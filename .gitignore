@@ -1,0 +1,9 @@
+node_modules/
+dist/
+shots/
+
+# 方向性の考えを書き留める場所。外に出さない。
+.claude/
+
+.DS_Store
+*.log
