@@ -50,6 +50,8 @@ src/view/     表示（上から見た島）
 
 - smoothstep の最大傾斜は平均の 1.5 倍。「高さ H を幅 W で落とす」は 1.5×H/W になる
 - 水面とほぼ同じ高さの平らな岸は、深度の精度が足りずチラつく
+- **`reversedDepthBuffer` を使わない。** three r185 で有効にすると、遠くの陸の上に海の板が
+  かぶって島の奥半分が白く覆われた。polygonOffset の向きを直しても消えず、原因は未特定
 - 湖の底を海面より下げない。海の板が湖の中に見えて水面が二重になる
 - スマホ GPU の `mediump` で大きな値を `fract()` に入れない（空の雲に亀裂が出た）
 - iOS Safari は click の pointerType を誤って報告する。直前の pointerdown を見る
