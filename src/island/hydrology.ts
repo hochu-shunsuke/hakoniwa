@@ -1,5 +1,5 @@
 import { MinHeap, NEIGHBORS8, type Grid } from './grid';
-import { mix, smoothstep } from './noise';
+import { mix, smoothstep } from '../world/noise';
 import type { IslandParams } from './params';
 
 /**

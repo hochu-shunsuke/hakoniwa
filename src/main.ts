@@ -15,11 +15,14 @@ import {
 } from './island/params';
 import type { GenerateRequest, GenerateResult } from './island/worker';
 import { Player } from './player/controller';
-import { IslandMesh } from './render/islandMesh';
+import { ChunkManager } from './render/chunkManager';
+import { OverviewMesh } from './render/overviewMesh';
 import { MORNING, Sky } from './render/sky';
 import { Water } from './render/water';
 import { type TouchControls, createTouchControls, isTouchDevice } from './ui/touch';
 import { drawIsland } from './view/mapView';
+import { IslandWater } from './world/islandWater';
+import { Terrain } from './world/terrain';
 
 /**
  * 箱庭。「つくる」では島を見渡しながらつまみで形を変え、「飛ぶ」では鳥になって島を飛ぶ。
@@ -62,8 +65,8 @@ const sky = new Sky(scene, MORNING);
 const fog = scene.fog as THREE.FogExp2;
 fog.density = FOG_MAKE;
 const water = new Water(scene, sky.sunDirection, MORNING.horizon, MORNING.sun);
-const islandMesh = new IslandMesh(water.material);
-scene.add(islandMesh.group);
+const overview = new OverviewMesh(water.material);
+scene.add(overview.group);
 
 const controls = new OrbitControls(camera, canvas);
 controls.target.set(0, 40, 0);
@@ -94,6 +97,11 @@ let pending: GenerateRequest | null = null;
 let drawnId = 0;
 let ground: IslandGround | null = null;
 let player: Player | null = null;
+/** 今の島（島全体の格子）と、それを 1 点ずつ引く地形。飛ぶときにチャンクへ渡す。 */
+let island: Island | null = null;
+let terrain: Terrain | null = null;
+let chunks: ChunkManager | null = null;
+let madeParams: IslandParams | null = null;
 
 function request(n: number): void {
   const req: GenerateRequest = { id: nextId++, params: { ...params }, n };
@@ -105,20 +113,28 @@ function request(n: number): void {
   worker.postMessage(req);
 }
 
-function show(island: Island): void {
-  islandMesh.set(island);
-  drawIsland(minimap, island);
-  if (ground) ground.island = island;
-  else ground = new IslandGround(island);
+function show(next: Island, made: IslandParams): void {
+  island = next;
+  madeParams = made;
+  terrain = new Terrain(made, new IslandWater({
+    n: next.n,
+    carve: next.carve,
+    level: next.waterLevel,
+    kind: next.waterKind,
+  }));
+  overview.set(next, terrain);
+  drawIsland(minimap, next, terrain);
+  if (ground) ground.terrain = terrain;
+  else ground = new IslandGround(terrain);
   flyButton.disabled = false;
 }
 
 worker.onmessage = (ev: MessageEvent<GenerateResult>) => {
-  const { id, island, ms } = ev.data;
+  const { id, island: next, ms, params: made } = ev.data;
   if (id > drawnId) {
     drawnId = id;
-    show(island);
-    status.textContent = `${island.n === FULL_RES ? '' : '下見 · '}${ms.toFixed(0)}ms`;
+    show(next, made);
+    status.textContent = `${next.n === FULL_RES ? '' : '下見 · '}${ms.toFixed(0)}ms`;
   }
   busy = false;
   if (pending) {
@@ -225,6 +241,19 @@ function startFlying(): void {
     });
   }
 
+  // 近くは stroll と同じチャンク（足元 2m 格子・木）で細かく描き、遠くは島全体の 1 枚に任せる。
+  if (island && madeParams) {
+    chunks = new ChunkManager(
+      scene,
+      {
+        params: madeParams,
+        water: { n: island.n, carve: island.carve, level: island.waterLevel, kind: island.waterKind },
+      },
+      water.material,
+    );
+    overview.setCoverage(chunks.coverage);
+  }
+
   mode = 'fly';
   controls.enabled = false;
   fog.density = FOG_FLY;
@@ -236,6 +265,9 @@ function startFlying(): void {
 function stopFlying(): void {
   if (mode !== 'fly') return;
   mode = 'make';
+  chunks?.dispose();
+  chunks = null;
+  overview.setCoverage(null);
   // 飛んでいた場所の前方を注視点にして、見渡す視点へ戻る。
   const dir = new THREE.Vector3();
   camera.getWorldDirection(dir);
@@ -284,6 +316,7 @@ renderer.setAnimationLoop(() => {
   if (mode === 'fly' && player) {
     player.update(dt, camera, reducedMotion);
     touchControls?.update();
+    chunks?.update(player.position.x, player.position.z);
   } else {
     controls.update();
   }

@@ -15,6 +15,8 @@ export interface GenerateRequest {
 export interface GenerateResult {
   id: number;
   island: Island;
+  /** この島を作ったときのつまみ。計算中につまみが動いても、島と地形の式を食い違わせない。 */
+  params: IslandParams;
   ms: number;
 }
 
@@ -22,12 +24,12 @@ self.onmessage = (ev: MessageEvent<GenerateRequest>) => {
   const { id, params, n } = ev.data;
   const started = performance.now();
   const island = generateIsland(params, n);
-  const result: GenerateResult = { id, island, ms: performance.now() - started };
+  const result: GenerateResult = { id, island, params, ms: performance.now() - started };
   (self as unknown as Worker).postMessage(result, [
     island.height.buffer,
+    island.carve.buffer,
     island.waterLevel.buffer,
     island.waterKind.buffer,
-    island.flow.buffer,
     island.temperature.buffer,
     island.moisture.buffer,
   ]);
