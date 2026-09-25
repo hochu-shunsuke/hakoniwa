@@ -13,10 +13,11 @@ import {
   encodeParams,
   randomSeed,
 } from './island/params';
-import type { GenerateRequest, GenerateResult } from './island/worker';
+import type { GenerateRequest, GenerateResult, LightResult } from './island/worker';
 import { Player } from './player/controller';
 import { ChunkManager } from './render/chunkManager';
 import { FarForest } from './render/farForest';
+import { setIslandLight, updateIslandLight } from './render/islandLight';
 import { OverviewMesh } from './render/overviewMesh';
 import { MORNING, Sky } from './render/sky';
 import { Water } from './render/water';
@@ -108,7 +109,8 @@ let madeParams: IslandParams | null = null;
 
 function request(n: number): void {
   const erosionN = n === FULL_RES ? EROSION_RES : EROSION_PREVIEW_RES;
-  const req: GenerateRequest = { id: nextId++, params: { ...params }, n, erosionN };
+  const sun = sky.sunDirection;
+  const req: GenerateRequest = { id: nextId++, params: { ...params }, n, erosionN, sun: [sun.x, sun.y, sun.z] };
   if (busy) {
     pending = req;
     return;
@@ -132,8 +134,22 @@ function show(next: Island, made: IslandParams): void {
   flyButton.disabled = false;
 }
 
-worker.onmessage = (ev: MessageEvent<GenerateResult>) => {
-  const { id, island: next, ms, params: made, forest } = ev.data;
+worker.onmessage = (ev: MessageEvent<GenerateResult | LightResult>) => {
+  const msg = ev.data;
+  if (msg.type === 'light') {
+    // 光は島の後から届く。今見せている島の光だけを使う。
+    if (msg.id === drawnId) setIslandLight(msg.lighting);
+    // Worker は光まで計算し終えたので、次の島を頼める。
+    busy = false;
+    if (pending) {
+      const req = pending;
+      pending = null;
+      busy = true;
+      worker.postMessage(req);
+    }
+    return;
+  }
+  const { id, island: next, ms, params: made, forest } = msg;
   if (id > drawnId) {
     drawnId = id;
     show(next, made);
@@ -141,13 +157,6 @@ worker.onmessage = (ev: MessageEvent<GenerateResult>) => {
     if (forest) farForest.set(forest);
     else farForest.clear();
     status.textContent = `${next.n === FULL_RES ? '' : '下見 · '}${ms.toFixed(0)}ms`;
-  }
-  busy = false;
-  if (pending) {
-    const req = pending;
-    pending = null;
-    busy = true;
-    worker.postMessage(req);
   }
 };
 
@@ -352,6 +361,7 @@ renderer.setAnimationLoop(() => {
   }
   fitNearPlane();
   sky.update(camera, elapsed);
+  updateIslandLight(dt);
   water.update(camera, elapsed);
   renderer.render(scene, camera);
 });
@@ -368,6 +378,7 @@ if (import.meta.env.DEV) {
     scene,
     sky,
     player: () => player,
+    island: () => island,
   };
 }
 flyButton.disabled = true;

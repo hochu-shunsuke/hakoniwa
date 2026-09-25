@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { C_SNOW } from '../world/islandSurface';
+import { injectIslandLight } from './islandLight';
 import { NOISE_CELLS, createNoiseTexture } from './noiseTexture';
 
 /**
@@ -45,10 +46,6 @@ const PARS_FRAGMENT = /* glsl */ `
   varying vec3 vTerrainNormal;
 
   uniform sampler2D uNoise;
-  // 波長 wave（m）の模様が、1 画素の長さ px に対して見分けられる度合い 0..1。
-  float terrainVisible(float wave, float px) {
-    return 1.0 - smoothstep(wave * 0.12, wave * 0.35, px);
-  }
   // 1 マス cell（m）の大きさで、4 つの独立なノイズ（中心 0）を引く。
   // 真上からだけ貼ると、崖では模様が斜面に沿って縦に引き伸ばされ、毛皮のような筋になった。
   // 面の向きに合わせて 3 方向から貼って混ぜる（triplanar）。w は 3 方向の重み。
@@ -78,8 +75,6 @@ const PARS_FRAGMENT = /* glsl */ `
 `;
 
 const COLOR_FRAGMENT = /* glsl */ `
-  vec2 tp = vTerrainPos.xz;
-  float px = max(length(fwidth(tp)), 1e-4);
   float up = normalize(vTerrainNormal).y;
 
   // ノイズは 3 つの大きさで 4 つずつ。大きさの比を整数にせず、向きも回して繰り返しを揃えない。
@@ -109,13 +104,11 @@ const COLOR_FRAGMENT = /* glsl */ `
   vec3 ground = vColor.rgb * (1.0 + grain * 0.45);
   ground *= vec3(1.0 + g1 * 0.12, 1.0 + g1 * 0.05, 1.0 - g1 * 0.1);
 
-  // 岩: 水平な地層の縞と、ゆるいまだら。まだらを強くすると毛羽立って見え、
-  // 細い線（割れ目・段の縁）を足すと地図の等高線のように見えた。縞は崖の向きに関係なく水平。
-  float y = vTerrainPos.y + nA.b * 5.0;
-  float strata = 0.1 * sin(y * 0.45) + 0.06 * sin(y * 0.13 + 1.7);
+  // 岩: ゆるいまだらだけ。高さの sin で地層の縞を入れていたが、等間隔の横縞が
+  // 斜面に並んで模様に見えた（利用者の指摘）。規則的な縞は入れない。
   float r1 = nA.a;
   float r3 = nC.b;
-  vec3 rockCol = vRock * (1.0 + strata * terrainVisible(8.0, px) + r1 * 0.2 + nB.b * 0.12 + r3 * 0.08);
+  vec3 rockCol = vRock * (1.0 + r1 * 0.2 + nB.b * 0.12 + r3 * 0.08);
 
   // 雪: ほぼ白。風に削られた細かいうねり。
   float s1 = nA.a;
@@ -172,6 +165,7 @@ export function createTerrainMaterial(options: TerrainMaterialOptions = {}): THR
         '#include <normal_fragment_maps>',
         '#include <normal_fragment_maps>\n  normal = terrainBump(-vViewPosition, normal, terrainHeight);',
       );
+    injectIslandLight(shader, 'vTerrainPos.xz');
   };
   material.customProgramCacheKey = () => `terrain:${options.cacheKey ?? ''}`;
   return material;

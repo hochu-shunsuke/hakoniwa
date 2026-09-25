@@ -15,6 +15,7 @@ import {
   KIND_SAKURA,
 } from '../world/vegetationKinds';
 import { COVERAGE_OFFSET, COVERAGE_SIZE } from './chunkManager';
+import { injectIslandLight } from './islandLight';
 import { paint } from './treeGeometry';
 
 /**
@@ -119,6 +120,7 @@ export class FarForest {
                 && texture2D(uCoverage, (c + 0.5) / ${COVERAGE_SIZE.toFixed(1)}).r > 0.75) discard;
             }`,
         );
+      injectIslandLight(shader, 'vTreeXZ');
     };
   }
 
