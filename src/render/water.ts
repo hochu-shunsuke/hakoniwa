@@ -34,6 +34,7 @@ const frag = /* glsl */ `
   uniform sampler2D uHeightMap;
   uniform float uHeightN;
   uniform float uIslandSize;
+  uniform vec2 uHeightOrigin;
   uniform sampler2D uWaves;
   varying vec3 vWorld;
 
@@ -52,10 +53,11 @@ const frag = /* glsl */ `
   }
 
   // 島の大きな形の高さ（m）。格子の 4 点を読んで双一次で補間する（浮動小数のテクスチャは
-  // 端末によって線形補間できないため、自分で混ぜる）。島の外は外洋の深さ。
+  // 端末によって線形補間できないため、自分で混ぜる）。格子の外は外洋の深さ。
+  // 格子は uHeightOrigin を中心に一辺 uIslandSize（島 1 つなら島、群島なら全体）。
   float groundAt(vec2 xz) {
     if (uHeightN < 2.0) return -70.0;
-    vec2 g = (xz / uIslandSize + 0.5) * (uHeightN - 1.0);
+    vec2 g = ((xz - uHeightOrigin) / uIslandSize + 0.5) * (uHeightN - 1.0);
     if (g.x < 0.0 || g.y < 0.0 || g.x > uHeightN - 1.0 || g.y > uHeightN - 1.0) return -70.0;
     vec2 i = min(floor(g), vec2(uHeightN - 2.0));
     vec2 f = g - i;
@@ -189,6 +191,7 @@ export function waterMaterial(
         uHeightMap: { value: null as THREE.Texture | null },
         uHeightN: { value: 0 },
         uIslandSize: { value: ISLAND_SIZE },
+        uHeightOrigin: { value: new THREE.Vector2() },
         uWaves: { value: createWaveTexture() },
         uSkyColor: { value: col(skyHorizon) },
         uSunColor: { value: col(sunHex) },
@@ -237,9 +240,14 @@ export class Water {
     scene.add(this.mesh);
   }
 
-  /** 島の大きな形の高さを渡す（水深で色と泡を変えるため）。島を作り直すたびに呼ぶ。 */
-  setHeightMap(height: Float32Array, n: number): void {
+  /**
+   * 島の大きな形の高さを渡す（水深で色と泡を変えるため）。島を作り直すたびに呼ぶ。
+   * 格子は (originX, originZ) を中心に一辺 size m。島 1 つなら島の格子そのもの。
+   */
+  setHeightMap(height: Float32Array, n: number, size = ISLAND_SIZE, originX = 0, originZ = 0): void {
     const u = this.material.uniforms;
+    u.uIslandSize.value = size;
+    (u.uHeightOrigin.value as THREE.Vector2).set(originX, originZ);
     (u.uHeightMap.value as THREE.Texture | null)?.dispose();
     const tex = new THREE.DataTexture(height, n, n, THREE.RedFormat, THREE.FloatType);
     tex.magFilter = THREE.NearestFilter;

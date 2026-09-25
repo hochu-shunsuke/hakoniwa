@@ -42,7 +42,8 @@ interface Pending {
  * 生成は Worker に投げるので、歩いている間にカクつかない。
  */
 export class ChunkManager {
-  private scene: THREE.Scene;
+  /** チャンクを置く親。島が原点にないとき（群島）は、島の中心に置いたグループを渡す。 */
+  private scene: THREE.Object3D;
   private material: THREE.Material;
   private waterMaterial: THREE.Material;
   private chunks = new Map<string, Chunk>();
@@ -65,7 +66,7 @@ export class ChunkManager {
   private readonly coverageData: Uint8Array;
 
   constructor(
-    scene: THREE.Scene,
+    scene: THREE.Object3D,
     init: Omit<InitRequest, 'type'>,
     waterMaterial: THREE.Material,
   ) {

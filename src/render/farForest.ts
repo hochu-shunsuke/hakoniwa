@@ -89,6 +89,8 @@ export class FarForest {
   private readonly uniforms = {
     uCoverage: { value: null as THREE.Texture | null },
     uCoverageOn: { value: 0 },
+    /** チャンクを作っている島の中心（世界座標）。coverage の番号はここから数える。 */
+    uCoverageOrigin: { value: new THREE.Vector2() },
   };
   private readonly material: THREE.MeshLambertMaterial;
   private readonly geometries = new Map<number, THREE.BufferGeometry | null>();
@@ -109,13 +111,14 @@ export class FarForest {
           `#include <common>
           varying vec2 vTreeXZ;
           uniform sampler2D uCoverage;
-          uniform float uCoverageOn;`,
+          uniform float uCoverageOn;
+          uniform vec2 uCoverageOrigin;`,
         )
         .replace(
           'void main() {',
           `void main() {
             if (uCoverageOn > 0.5) {
-              vec2 c = floor(vTreeXZ / ${CHUNK_SIZE.toFixed(1)}) + ${COVERAGE_OFFSET.toFixed(1)};
+              vec2 c = floor((vTreeXZ - uCoverageOrigin) / ${CHUNK_SIZE.toFixed(1)}) + ${COVERAGE_OFFSET.toFixed(1)};
               if (c.x >= 0.0 && c.y >= 0.0 && c.x < ${COVERAGE_SIZE.toFixed(1)} && c.y < ${COVERAGE_SIZE.toFixed(1)}
                 && texture2D(uCoverage, (c + 0.5) / ${COVERAGE_SIZE.toFixed(1)}).r > 0.75) discard;
             }`,
@@ -148,9 +151,10 @@ export class FarForest {
   }
 
   /** 飛んでいる間は、本物の木を描いているチャンクの所を描かない。null で全部描く。 */
-  setCoverage(texture: THREE.Texture | null): void {
+  setCoverage(texture: THREE.Texture | null, originX = 0, originZ = 0): void {
     this.uniforms.uCoverage.value = texture;
     this.uniforms.uCoverageOn.value = texture ? 1 : 0;
+    this.uniforms.uCoverageOrigin.value.set(originX, originZ);
   }
 
   clear(): void {

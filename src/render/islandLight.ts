@@ -23,6 +23,9 @@ export const islandLightUniforms = {
   uIslandLight: { value: null as THREE.DataTexture | null },
   uIslandLightN: { value: 2 },
   uIslandLightOn: { value: 0 },
+  /** 光の格子の中心と一辺（m）。島 1 つなら島の格子、群島なら全体。 */
+  uIslandLightOrigin: { value: new THREE.Vector2() },
+  uIslandLightSize: { value: ISLAND_SIZE },
 };
 
 /** 断片シェーダーの宣言。islandLightAt(xz) は [太陽が当たる割合, 空が見える割合]。島の外は両方 1。 */
@@ -30,9 +33,11 @@ export const ISLAND_LIGHT_PARS = /* glsl */ `
   uniform sampler2D uIslandLight;
   uniform float uIslandLightN;
   uniform float uIslandLightOn;
+  uniform vec2 uIslandLightOrigin;
+  uniform float uIslandLightSize;
   vec2 islandLightAt(vec2 xz) {
     if (uIslandLightOn <= 0.0) return vec2(1.0);
-    vec2 uv = xz / ${ISLAND_SIZE.toFixed(1)} + 0.5;
+    vec2 uv = (xz - uIslandLightOrigin) / uIslandLightSize + 0.5;
     if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) return vec2(1.0);
     // 格子の点が画素の中心に来るように。
     uv = (uv * (uIslandLightN - 1.0) + 0.5) / uIslandLightN;
@@ -63,9 +68,14 @@ export function injectIslandLight(shader: THREE.WebGLProgramParametersWithUnifor
     .replace('#include <aomap_fragment>', `${islandLightApply(xz)}\n#include <aomap_fragment>`);
 }
 
-/** 島の光を差し替える。形の近い島（つまみの下見）どうしでは、届くまで古い光のまま待つ。 */
-export function setIslandLight(lighting: IslandLighting): void {
+/**
+ * 島の光を差し替える。形の近い島（つまみの下見）どうしでは、届くまで古い光のまま待つ。
+ * 格子は (originX, originZ) を中心に一辺 size m。
+ */
+export function setIslandLight(lighting: IslandLighting, size = ISLAND_SIZE, originX = 0, originZ = 0): void {
   const u = islandLightUniforms;
+  u.uIslandLightSize.value = size;
+  u.uIslandLightOrigin.value.set(originX, originZ);
   const wasOff = u.uIslandLight.value === null;
   u.uIslandLight.value?.dispose();
   const { n, data } = lighting;

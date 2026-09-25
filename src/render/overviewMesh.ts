@@ -23,78 +23,88 @@ const OUTER_SEABED = -80.5;
 interface CoverageUniforms {
   uCoverage: { value: THREE.Texture | null };
   uCoverageOn: { value: number };
+  /** チャンクを作っている島の中心（世界座標）。coverage の番号はここから数える。 */
+  uCoverageOrigin: { value: THREE.Vector2 };
 }
 
 const COVERAGE_GLSL = /* glsl */ `
   uniform sampler2D uCoverage;
   uniform float uCoverageOn;
+  uniform vec2 uCoverageOrigin;
   bool coveredByChunk(vec2 xz) {
     if (uCoverageOn < 0.5) return false;
-    vec2 c = floor(xz / ${CHUNK_SIZE.toFixed(1)}) + ${COVERAGE_OFFSET.toFixed(1)};
+    vec2 c = floor((xz - uCoverageOrigin) / ${CHUNK_SIZE.toFixed(1)}) + ${COVERAGE_OFFSET.toFixed(1)};
     if (c.x < 0.0 || c.y < 0.0 || c.x >= ${COVERAGE_SIZE.toFixed(1)} || c.y >= ${COVERAGE_SIZE.toFixed(1)}) return false;
     return texture2D(uCoverage, (c + 0.5) / ${COVERAGE_SIZE.toFixed(1)}).r > 0.25;
   }
 `;
 
-export function buildOverviewTerrain(island: Island, terrain: Terrain): THREE.BufferGeometry {
+/** 見渡す島の地面。step 点ごとに間引いた格子で作る（1 で島の格子そのもの）。 */
+export function buildOverviewTerrain(island: Island, terrain: Terrain, step = 1): THREE.BufferGeometry {
   const { n, cell, height, temperature, moisture } = island;
-  const position = new Float32Array(n * n * 3);
-  const normal = new Float32Array(n * n * 3);
-  const color = new Float32Array(n * n * 3);
-  const rock = new Float32Array(n * n * 3);
-  const surf = new Float32Array(n * n * 3);
+  const m = Math.floor((n - 1) / step) + 1;
+  const count = m * m;
+  const position = new Float32Array(count * 3);
+  const normal = new Float32Array(count * 3);
+  const color = new Float32Array(count * 3);
+  const rock = new Float32Array(count * 3);
+  const surf = new Float32Array(count * 3);
   const layers = new Float32Array(SURFACE_STRIDE);
   const at = (i: number, j: number) =>
     height[Math.max(0, Math.min(n - 1, j)) * n + Math.max(0, Math.min(n - 1, i))];
-  for (let j = 0; j < n; j++) {
+  const span = cell * step;
+  for (let b = 0; b < m; b++) {
+    const j = Math.min(n - 1, b * step);
     const z = gridToWorld(j, n);
-    for (let i = 0; i < n; i++) {
+    for (let a = 0; a < m; a++) {
+      const i = Math.min(n - 1, a * step);
       const k = j * n + i;
+      const v = b * m + a;
       const x = gridToWorld(i, n);
       const h = height[k];
-      position[k * 3] = x;
-      position[k * 3 + 1] = h;
-      position[k * 3 + 2] = z;
-      // 法線と傾きは chunk.ts と同じ中心差分で取る。
-      const dx = (at(i + 1, j) - at(i - 1, j)) / (2 * cell);
-      const dz = (at(i, j + 1) - at(i, j - 1)) / (2 * cell);
+      position[v * 3] = x;
+      position[v * 3 + 1] = h;
+      position[v * 3 + 2] = z;
+      // 法線と傾きは chunk.ts と同じ中心差分で取る（間引いた間隔で）。
+      const dx = (at(i + step, j) - at(i - step, j)) / (2 * span);
+      const dz = (at(i, j + step) - at(i, j - step)) / (2 * span);
       const len = Math.sqrt(dx * dx + 1 + dz * dz);
-      normal[k * 3] = -dx / len;
-      normal[k * 3 + 1] = 1 / len;
-      normal[k * 3 + 2] = -dz / len;
+      normal[v * 3] = -dx / len;
+      normal[v * 3 + 1] = 1 / len;
+      normal[v * 3 + 2] = -dz / len;
       const slope = Math.min(1, Math.sqrt(dx * dx + dz * dz));
       terrain.surface(x, z, h, slope, temperature[k], moisture[k], terrain.specialAt(x, z), terrain.patchAt(x, z), layers, 0);
       for (let c = 0; c < 3; c++) {
-        color[k * 3 + c] = layers[c];
-        rock[k * 3 + c] = layers[3 + c];
-        surf[k * 3 + c] = layers[6 + c];
+        color[v * 3 + c] = layers[c];
+        rock[v * 3 + c] = layers[3 + c];
+        surf[v * 3 + c] = layers[6 + c];
       }
     }
   }
 
-  const index = new Uint32Array((n - 1) * (n - 1) * 6);
+  const index = new Uint32Array((m - 1) * (m - 1) * 6);
   let o = 0;
-  for (let j = 0; j < n - 1; j++) {
-    for (let i = 0; i < n - 1; i++) {
-      const a = j * n + i;
-      const b = a + 1;
-      const d = a + n;
-      const e = d + 1;
+  for (let b = 0; b < m - 1; b++) {
+    for (let a = 0; a < m - 1; a++) {
+      const v00 = b * m + a;
+      const v10 = v00 + 1;
+      const v01 = v00 + m;
+      const v11 = v01 + 1;
       // チャンクと同じ割り方（高低差の小さい対角線）。
-      if (splitsAlongMainDiagonal(height[a], height[b], height[d], height[e])) {
-        index[o++] = a;
-        index[o++] = d;
-        index[o++] = e;
-        index[o++] = a;
-        index[o++] = e;
-        index[o++] = b;
+      if (splitsAlongMainDiagonal(position[v00 * 3 + 1], position[v10 * 3 + 1], position[v01 * 3 + 1], position[v11 * 3 + 1])) {
+        index[o++] = v00;
+        index[o++] = v01;
+        index[o++] = v11;
+        index[o++] = v00;
+        index[o++] = v11;
+        index[o++] = v10;
       } else {
-        index[o++] = a;
-        index[o++] = d;
-        index[o++] = b;
-        index[o++] = d;
-        index[o++] = e;
-        index[o++] = b;
+        index[o++] = v00;
+        index[o++] = v01;
+        index[o++] = v10;
+        index[o++] = v01;
+        index[o++] = v11;
+        index[o++] = v10;
       }
     }
   }
@@ -159,11 +169,20 @@ export class OverviewMesh {
   private readonly uniforms: CoverageUniforms = {
     uCoverage: { value: null },
     uCoverageOn: { value: 0 },
+    uCoverageOrigin: { value: new THREE.Vector2() },
   };
   private readonly terrainMaterial: THREE.MeshLambertMaterial;
   private readonly waterMaterial: THREE.ShaderMaterial;
 
-  constructor(sharedWater: THREE.ShaderMaterial) {
+  /**
+   * step は見渡す島の格子を何点ごとに使うか。1 で約 5m。群島のように島を何個も描くときは
+   * 粗くして三角形を減らす（近くはチャンクが描く）。seabed は格子の外に海底を敷くか
+   * （群島では全体に 1 枚だけ敷く）。
+   */
+  constructor(
+    sharedWater: THREE.ShaderMaterial,
+    private readonly options: { step?: number; seabed?: boolean } = {},
+  ) {
     this.terrainMaterial = createTerrainMaterial({
       uniforms: this.uniforms as unknown as Record<string, THREE.IUniform>,
       fragmentPars: COVERAGE_GLSL,
@@ -179,24 +198,20 @@ export class OverviewMesh {
       .replace('void main() {', 'void main() {\n    if (coveredByChunk(vWorld.xz)) discard;');
 
     // 格子の外にも海底が無いと、島のまわりに格子の四角い境目が透けて見える。
-    const seabed = new THREE.Mesh(
-      // 巨大な三角形 2 枚にすると深度の補間誤差が大きいので、400m 四方に分ける（water.ts と同じ理由）。
-      new THREE.PlaneGeometry(80000, 80000, 200, 200).rotateX(-Math.PI / 2),
-      new THREE.MeshLambertMaterial({ color: SEABED_DEEP }),
-    );
-    seabed.position.y = OUTER_SEABED;
-    this.group.add(seabed);
+    if (options.seabed !== false) this.group.add(outerSeabed());
   }
 
   /** 飛んでいる間は、近くのチャンクができている所を描かない。null で全部描く。 */
-  setCoverage(texture: THREE.Texture | null): void {
+  setCoverage(texture: THREE.Texture | null, originX = 0, originZ = 0): void {
     this.uniforms.uCoverage.value = texture;
     this.uniforms.uCoverageOn.value = texture ? 1 : 0;
+    this.uniforms.uCoverageOrigin.value.set(originX, originZ);
   }
 
-  set(island: Island, terrain: Terrain): void {
+  /** step を渡すと、この島だけ間引き方を変える（下見の粗い島は間引かない、など）。 */
+  set(island: Island, terrain: Terrain, step = this.options.step ?? 1): void {
     this.clear();
-    this.terrain = new THREE.Mesh(buildOverviewTerrain(island, terrain), this.terrainMaterial);
+    this.terrain = new THREE.Mesh(buildOverviewTerrain(island, terrain, step), this.terrainMaterial);
     this.group.add(this.terrain);
     const waterGeo = buildOverviewWater(island);
     if (waterGeo) {
@@ -215,4 +230,14 @@ export class OverviewMesh {
     this.terrain = null;
     this.water = null;
   }
+}
+
+/** 格子の外に敷く海底（巨大な三角形 2 枚にすると深度の補間誤差が大きいので、400m 四方に分ける）。 */
+export function outerSeabed(): THREE.Mesh {
+  const seabed = new THREE.Mesh(
+    new THREE.PlaneGeometry(80000, 80000, 200, 200).rotateX(-Math.PI / 2),
+    new THREE.MeshLambertMaterial({ color: SEABED_DEEP }),
+  );
+  seabed.position.y = OUTER_SEABED;
+  return seabed;
 }
