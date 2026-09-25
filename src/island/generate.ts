@@ -1,39 +1,43 @@
+import type { LandscapeArrays } from '../world/islandShape';
+import { type IslandWaterArrays, IslandWater } from '../world/islandWater';
 import { Terrain } from '../world/terrain';
 import { gridToWorld } from './ground';
 import { makeGrid } from './grid';
-import { routeWater } from './hydrology';
+import { WATER_LAKE, WATER_RIVER, routeWater } from './hydrology';
+import { buildLandscape } from './landscape';
 import type { IslandParams } from './params';
 
 /**
- * 島全体の格子。stroll の地形の式（1 点ずつ）で島全体を引き、そこへ湖と川を求める。
+ * 島 1 つ分の計算。
+ *   1. 大きな形: 隆起させた山を川が削る（landscape.ts、侵食の格子）
+ *   2. 水: 同じ格子で水を満たして湖を決め、流れを集めて川にする（hydrology.ts）
+ *   3. 見渡す島: 細かい格子で、細部と水を重ねた標高・気候を引く（見渡す島と遠景の 1 枚に使う）
  *
- * 細かい地形（近くのチャンク）は 1 点ずつの式で描くが、湖と川は島全体を見ないと
- * 決まらない。そこでこの格子で一度だけ水を求め、彫った量と水面を islandWater.ts 経由で
- * 1 点ずつの式に戻す（「周りが要る量は格子で一度だけ」）。
+ * 近くのチャンクは 1 と 2 の結果（landscape・water）を受け取り、1 点ずつ同じ式で引く。
  */
 export interface Island {
+  /** 見渡す島の格子（1 辺の点数）と間隔（m）。 */
   n: number;
   cell: number;
-  /** 地面の高さ（m）。川に合わせて彫った後。海面が 0。 */
+  /** 地面の高さ（m）。海面が 0。 */
   height: Float32Array;
-  /** 彫った量（m、0 以下）。細かい地形へ戻すのに使う。 */
-  carve: Float32Array;
   /** 水面の高さ（m）。水が無ければ NaN。 */
   waterLevel: Float32Array;
   /** 1 = 川、2 = 湖。 */
   waterKind: Uint8Array;
   temperature: Float32Array;
   moisture: Float32Array;
+  /** 大きな形と水（侵食の格子）。近くのチャンクへそのまま渡す。 */
+  landscape: LandscapeArrays;
+  water: IslandWaterArrays;
   /** 工程ごとの時間（ms）。 */
   timings: Record<string, number>;
 }
 
-/** 湿り気は雨陰の計算で重い（1 回 10µs）。この間隔ごとに引いて補間する。 */
+/** 湿り気は雨陰の計算で重い。この間隔ごとに引いて補間する。 */
 const MOISTURE_EVERY = 4;
 
-export function generateIsland(p: IslandParams, n: number): Island {
-  const grid = makeGrid(n);
-  const terrain = new Terrain(p);
+export function generateIsland(p: IslandParams, n: number, erosionN: number): Island {
   const timings: Record<string, number> = {};
   let t = performance.now();
   const lap = (name: string) => {
@@ -42,14 +46,47 @@ export function generateIsland(p: IslandParams, n: number): Island {
     t = now;
   };
 
+  // 1. 大きな形。
+  const landscape = buildLandscape(p, erosionN);
+  lap('隆起と侵食');
+
+  // 2. 水。雨は湿った所ほど多く降る（川の水量の重み）。
+  const eGrid = makeGrid(erosionN);
+  const dry = new Terrain(p, landscape);
+  const rain = new Float32Array(erosionN * erosionN);
+  for (let j = 0; j < erosionN; j++) {
+    const z = gridToWorld(j, erosionN);
+    for (let i = 0; i < erosionN; i++) rain[j * erosionN + i] = 0.3 + dry.moistureAt(gridToWorld(i, erosionN), z);
+  }
+  const carved = landscape.height.slice();
+  const water = routeWater(carved, rain, p, eGrid);
+  const carve = new Float32Array(carved.length);
+  for (let k = 0; k < carved.length; k++) carve[k] = carved[k] - landscape.height[k];
+  const waterArrays: IslandWaterArrays = { n: erosionN, carve, level: water.level, kind: water.kind };
+  lap('水');
+
+  // 3. 見渡す島。
+  const grid = makeGrid(n);
+  const islandWater = new IslandWater(waterArrays);
+  const terrain = new Terrain(p, landscape, islandWater);
   const height = new Float32Array(n * n);
+  const waterLevel = new Float32Array(n * n).fill(Number.NaN);
+  const waterKind = new Uint8Array(n * n);
   for (let j = 0; j < n; j++) {
     const z = gridToWorld(j, n);
-    for (let i = 0; i < n; i++) height[j * n + i] = terrain.heightAt(gridToWorld(i, n), z);
+    for (let i = 0; i < n; i++) {
+      const x = gridToWorld(i, n);
+      const k = j * n + i;
+      height[k] = terrain.heightAt(x, z);
+      const level = islandWater.levelAt(x, z);
+      if (level > -Infinity) {
+        waterLevel[k] = level;
+        waterKind[k] = islandWater.kindAt(x, z) === WATER_LAKE ? WATER_LAKE : WATER_RIVER;
+      }
+    }
   }
-  lap('地形');
+  lap('標高');
 
-  // 湿り気を粗く引いて補間する。
   const m = Math.ceil((n - 1) / MOISTURE_EVERY) + 1;
   const coarse = new Float32Array(m * m);
   for (let j = 0; j < m; j++) {
@@ -60,7 +97,9 @@ export function generateIsland(p: IslandParams, n: number): Island {
     }
   }
   const moisture = new Float32Array(n * n);
+  const temperature = new Float32Array(n * n);
   for (let j = 0; j < n; j++) {
+    const z = gridToWorld(j, n);
     for (let i = 0; i < n; i++) {
       const u = Math.min(m - 1.0001, i / MOISTURE_EVERY);
       const v = Math.min(m - 1.0001, j / MOISTURE_EVERY);
@@ -72,39 +111,23 @@ export function generateIsland(p: IslandParams, n: number): Island {
       const b = coarse[cj * m + ci + 1];
       const c = coarse[(cj + 1) * m + ci];
       const d = coarse[(cj + 1) * m + ci + 1];
-      moisture[j * n + i] = (a + (b - a) * fu) * (1 - fv) + (c + (d - c) * fu) * fv;
-    }
-  }
-  lap('湿り気');
-
-  // 雨は湿った所ほど多く降る。川の水量の重み。
-  const rain = new Float32Array(n * n);
-  for (let k = 0; k < n * n; k++) rain[k] = 0.3 + moisture[k];
-  const before = height.slice();
-  const water = routeWater(height, rain, p, grid);
-  const carve = new Float32Array(n * n);
-  for (let k = 0; k < n * n; k++) carve[k] = height[k] - before[k];
-  lap('水');
-
-  const temperature = new Float32Array(n * n);
-  for (let j = 0; j < n; j++) {
-    const z = gridToWorld(j, n);
-    for (let i = 0; i < n; i++) {
       const k = j * n + i;
+      moisture[k] = (a + (b - a) * fu) * (1 - fv) + (c + (d - c) * fu) * fv;
       temperature[k] = terrain.temperatureAt(gridToWorld(i, n), z, height[k]);
     }
   }
-  lap('気温');
+  lap('気候');
 
   return {
     n,
     cell: grid.cell,
     height,
-    carve,
-    waterLevel: water.level,
-    waterKind: water.kind,
+    waterLevel,
+    waterKind,
     temperature,
     moisture,
+    landscape,
+    water: waterArrays,
     timings,
   };
 }

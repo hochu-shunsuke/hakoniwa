@@ -2,10 +2,10 @@ import { hashSeed } from '../core/rng';
 import type { IslandParams } from '../island/params';
 import { Climate } from './climate';
 import type { IslandWater } from './islandWater';
-import { Noise2D, clamp, mix } from './noise';
+import { Noise2D, clamp, mix, smoothstep } from './noise';
 import { type SpecialHit, specialAt } from './special';
 import { shadeTerrain } from './surfaceShade';
-import { type ShapeConfig, TerrainShape } from './terrainShape';
+import { IslandShape, type LandscapeArrays } from './islandShape';
 
 export const SEA_LEVEL = 0;
 
@@ -24,26 +24,16 @@ export function splitsAlongMainDiagonal(
   return Math.abs(h00 - h11) <= Math.abs(h01 - h10);
 }
 
-/** つまみ（0..100）→ stroll の式の係数。 */
-export function shapeConfig(p: IslandParams): ShapeConfig {
-  return {
-    radius: mix(0.34, 0.8, p.size / 100),
-    coast: mix(0.25, 0.95, p.shape / 100),
-    mountains: mix(0.25, 2.2, p.mountains / 100),
-    relief: mix(0.45, 1.6, p.erosion / 100),
-  };
-}
-
 /**
  * 島の地形の公開窓口。stroll の Terrain と同じ API（描画・植生・プレイヤーはこれだけを見る）。
  *
- * 標高は stroll の式（terrainShape.ts）を島の形にしたもの。湖と川は島全体の格子で
- * 求めた水（islandWater.ts）を重ねる。水を渡さなければ、水を計算する前の地形になる
- * （島全体の水を求めるときに使う）。
+ * 標高は、隆起させた山を川が削った島の大きな形（island/landscape.ts）に細部を足したもの
+ * （islandShape.ts）。湖と川は島全体の格子で求めた水（islandWater.ts）を重ねる。
+ * 水を渡さなければ、水を計算する前の地形になる（島全体の水を求めるときに使う）。
  */
 export class Terrain {
   readonly params: IslandParams;
-  private readonly shape: TerrainShape;
+  private readonly shape: IslandShape;
   private readonly climate: Climate;
   private readonly nSpecialEdge: Noise2D;
   private readonly specialSalt: number;
@@ -53,11 +43,12 @@ export class Terrain {
 
   constructor(
     params: IslandParams,
+    landscape: LandscapeArrays,
     private readonly water: IslandWater | null = null,
   ) {
     this.params = params;
     const [a, b, c, d] = hashSeed(params.seed);
-    this.shape = new TerrainShape(a, b, c, d, shapeConfig(params));
+    this.shape = new IslandShape(landscape, d);
     this.climate = new Climate(a, b, c, d, this.shape.massAt);
     // 区画抽選にもシードを混ぜる。忘れると全部の島で宝物の位置が同じになる。
     this.nSpecialEdge = new Noise2D((a ^ 0x165667b1) >>> 0);
@@ -103,10 +94,15 @@ export class Terrain {
     return this.water ? this.water.levelAt(x, z) : -Infinity;
   }
 
-  /** 標高。海面は 0。川に合わせて彫った量を足す。 */
+  /**
+   * 標高。海面は 0。川に合わせて彫った量を足す。
+   * 川と湖の中では細部を弱める。細部が水面から顔を出すと、湖に粒の小島が並び、川に土手が立つ。
+   */
   heightAt(x: number, z: number): number {
-    const h = this.shape.heightAt(x, z);
-    return this.water ? h + this.water.carveAt(x, z) : h;
+    if (!this.water) return this.shape.heightAt(x, z);
+    const carve = this.water.carveAt(x, z);
+    const calm = Math.max(this.water.wetAt(x, z), smoothstep(0, 1.5, -carve));
+    return this.shape.heightAt(x, z, 1 - calm) + carve;
   }
 
   /**

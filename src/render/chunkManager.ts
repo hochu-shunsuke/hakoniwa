@@ -15,6 +15,9 @@ export const COVERAGE_SIZE = Math.ceil(ISLAND_SIZE / CHUNK_SIZE) + 2;
 /** 世界のチャンク番号 → テクスチャの番号。島の中心（0,0）が真ん中に来る。 */
 export const COVERAGE_OFFSET = COVERAGE_SIZE / 2;
 
+/** 本物の木を置くチャンクの粗さの上限（vegetationSpecs.ts の maxLod のうち木のもの）。 */
+const TREE_LOD = 1;
+
 interface Chunk {
   mesh: THREE.Mesh;
   scatter: THREE.Group | null;
@@ -53,7 +56,10 @@ export class ChunkManager {
   /** 足元付近のチャンクが揃ったか（開始画面を閉じる判定に使う）。 */
   ready = false;
 
-  /** どのチャンクができているか（1 = できている）。遠景の島がここを描かない。 */
+  /**
+   * どのチャンクができているか。0 = 無し、0.5 = 地形だけ、1 = 地形と本物の木。
+   * 遠景の島は 0.25 を越える所、遠目の木は 0.75 を越える所を描かない。
+   */
   readonly coverage: THREE.DataTexture;
   private readonly coverageData: Uint8Array;
 
@@ -88,11 +94,11 @@ export class ChunkManager {
     this.coverage.needsUpdate = true;
   }
 
-  private setCoverage(cx: number, cz: number, on: boolean): void {
+  private setCoverage(cx: number, cz: number, value: number): void {
     const i = cx + COVERAGE_OFFSET;
     const j = cz + COVERAGE_OFFSET;
     if (i < 0 || j < 0 || i >= COVERAGE_SIZE || j >= COVERAGE_SIZE) return;
-    this.coverageData[j * COVERAGE_SIZE + i] = on ? 255 : 0;
+    this.coverageData[j * COVERAGE_SIZE + i] = value;
     this.coverage.needsUpdate = true;
   }
 
@@ -248,7 +254,8 @@ export class ChunkManager {
     if (old) this.disposeChunk(old);
 
     this.chunks.set(key, { mesh, scatter, lake, lod: data.lod, cx: data.cx, cz: data.cz });
-    this.setCoverage(data.cx, data.cz, true);
+    // 本物の木を置く粗さ（TREE_LOD 以下）なら、遠目の木をここで消す。
+    this.setCoverage(data.cx, data.cz, data.lod <= TREE_LOD ? 255 : 128);
 
     // 生成中にプレイヤーが動いて、必要な粗さが変わっていることがある。
     // ここで積み直さないと、次にチャンク境界を跨ぐまで粗いまま残る。
@@ -269,7 +276,7 @@ export class ChunkManager {
   }
 
   private disposeChunk(chunk: Chunk): void {
-    this.setCoverage(chunk.cx, chunk.cz, false);
+    this.setCoverage(chunk.cx, chunk.cz, 0);
     this.scene.remove(chunk.mesh);
     chunk.mesh.geometry.dispose();
     if (chunk.lake) {

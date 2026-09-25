@@ -3,7 +3,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import './style.css';
 import './touch.css';
 import type { Island } from './island/generate';
-import { FULL_RES, ISLAND_SIZE, PREVIEW_RES } from './island/grid';
+import { EROSION_PREVIEW_RES, EROSION_RES, FULL_RES, ISLAND_SIZE, PREVIEW_RES } from './island/grid';
 import { IslandGround } from './island/ground';
 import {
   type IslandParams,
@@ -16,6 +16,7 @@ import {
 import type { GenerateRequest, GenerateResult } from './island/worker';
 import { Player } from './player/controller';
 import { ChunkManager } from './render/chunkManager';
+import { FarForest } from './render/farForest';
 import { OverviewMesh } from './render/overviewMesh';
 import { MORNING, Sky } from './render/sky';
 import { Water } from './render/water';
@@ -67,6 +68,8 @@ fog.density = FOG_MAKE;
 const water = new Water(scene, sky.sunDirection, MORNING.horizon, MORNING.sun);
 const overview = new OverviewMesh(water.material);
 scene.add(overview.group);
+const farForest = new FarForest();
+scene.add(farForest.group);
 
 const controls = new OrbitControls(camera, canvas);
 controls.target.set(0, 40, 0);
@@ -104,7 +107,8 @@ let chunks: ChunkManager | null = null;
 let madeParams: IslandParams | null = null;
 
 function request(n: number): void {
-  const req: GenerateRequest = { id: nextId++, params: { ...params }, n };
+  const erosionN = n === FULL_RES ? EROSION_RES : EROSION_PREVIEW_RES;
+  const req: GenerateRequest = { id: nextId++, params: { ...params }, n, erosionN };
   if (busy) {
     pending = req;
     return;
@@ -116,12 +120,7 @@ function request(n: number): void {
 function show(next: Island, made: IslandParams): void {
   island = next;
   madeParams = made;
-  terrain = new Terrain(made, new IslandWater({
-    n: next.n,
-    carve: next.carve,
-    level: next.waterLevel,
-    kind: next.waterKind,
-  }));
+  terrain = new Terrain(made, next.landscape, new IslandWater(next.water));
   overview.set(next, terrain);
   drawIsland(minimap, next, terrain);
   if (ground) ground.terrain = terrain;
@@ -130,10 +129,13 @@ function show(next: Island, made: IslandParams): void {
 }
 
 worker.onmessage = (ev: MessageEvent<GenerateResult>) => {
-  const { id, island: next, ms, params: made } = ev.data;
+  const { id, island: next, ms, params: made, forest } = ev.data;
   if (id > drawnId) {
     drawnId = id;
     show(next, made);
+    // 下見の間は古い島の木を残さない（地形と食い違う）。本番の格子で作り直したら植える。
+    if (forest) farForest.set(forest);
+    else farForest.clear();
     status.textContent = `${next.n === FULL_RES ? '' : '下見 · '}${ms.toFixed(0)}ms`;
   }
   busy = false;
@@ -247,11 +249,13 @@ function startFlying(): void {
       scene,
       {
         params: madeParams,
-        water: { n: island.n, carve: island.carve, level: island.waterLevel, kind: island.waterKind },
+        landscape: island.landscape,
+        water: island.water,
       },
       water.material,
     );
     overview.setCoverage(chunks.coverage);
+    farForest.setCoverage(chunks.coverage);
   }
 
   mode = 'fly';
@@ -268,6 +272,7 @@ function stopFlying(): void {
   chunks?.dispose();
   chunks = null;
   overview.setCoverage(null);
+  farForest.setCoverage(null);
   // 飛んでいた場所の前方を注視点にして、見渡す視点へ戻る。
   const dir = new THREE.Vector3();
   camera.getWorldDirection(dir);
@@ -305,6 +310,25 @@ addEventListener('mousemove', (e: MouseEvent) => {
   player.onLook(e.movementX, e.movementY, LOOK_SENSITIVITY);
 });
 
+/**
+ * 描画の近い側の限界（near）を、見ている距離に合わせる。
+ *
+ * 深度の精度は near に比例する。見渡すときにカメラは島から数 km 離れるのに、near が
+ * 飛ぶとき用の 0.5m のままだと、遠くの浜辺で精度が数 m しかなく、海の板と平らな浜が
+ * 描くたびに入れ替わってガタついた。見渡すときは注視点までの距離の 0.3% にする
+ * （4km なら 12m、精度は 24 倍）。
+ */
+function fitNearPlane(): void {
+  const near =
+    mode === 'fly'
+      ? 0.5
+      : Math.min(30, Math.max(0.5, camera.position.distanceTo(controls.target) * 0.003));
+  if (Math.abs(near - camera.near) > camera.near * 0.1) {
+    camera.near = near;
+    camera.updateProjectionMatrix();
+  }
+}
+
 // ── 毎フレーム ─────────────────────────────────────────
 const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 const timer = new THREE.Timer();
@@ -320,6 +344,7 @@ renderer.setAnimationLoop(() => {
   } else {
     controls.update();
   }
+  fitNearPlane();
   sky.update(camera, elapsed);
   water.update(camera, elapsed);
   renderer.render(scene, camera);

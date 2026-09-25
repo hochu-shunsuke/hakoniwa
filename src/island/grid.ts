@@ -9,13 +9,20 @@
  * 侵食のような繰り返しの計算はその差を増幅するので、同じ URL でも端末ごとに別の島になる。
  */
 
-/** 島の一辺（m）。鳥の巡航 78m/s で端から端まで約 80 秒。 */
-export const ISLAND_SIZE = 6144;
+/**
+ * 島の一辺（m）。鳥の巡航 78m/s で端から端まで約 50 秒。
+ * 6,144m だった頃は格子の 7 割が海だった。島に合わせて縮め、同じ計算量で細かくする。
+ */
+export const ISLAND_SIZE = 4096;
 
-/** 本番の格子の点数（1 辺）。12m 間隔。 */
-export const FULL_RES = 513;
-/** つまみを動かしている間の下見用。24m 間隔。 */
+/** 本番の格子の点数（1 辺）。約 5.3m 間隔。見渡す島と遠景をこの細かさで描く。 */
+export const FULL_RES = 769;
+/** つまみを動かしている間の下見用。16m 間隔。 */
 export const PREVIEW_RES = 257;
+
+/** 侵食を計算する格子（1 辺）。本番 16m、下見 32m。侵食は重いので描く格子より粗くする。 */
+export const EROSION_RES = 257;
+export const EROSION_PREVIEW_RES = 129;
 
 export interface Grid {
   /** 1 辺の点数。 */

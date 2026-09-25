@@ -8,6 +8,7 @@ import {
   DEFAULT_TINT,
   GIANT_MAX,
   GIANT_MIN,
+  type KindSpec,
   VEGETATION_SPECS,
 } from './vegetationSpecs';
 
@@ -140,7 +141,7 @@ const CTX = {
  * Y 軸回転 → X 軸の微傾き → スケール、を合成した 4x4 行列を列優先で書き出す。
  * （Worker 側に three を持ち込まないため手計算する）
  */
-function composeInto(
+export function composeInto(
   out: Float32Array,
   o: number,
   px: number, py: number, pz: number,
@@ -153,6 +154,53 @@ function composeInto(
   out[o + 4] = sb * sa * sy;   out[o + 5] = ca * sy;  out[o + 6] = cb * sa * sy;  out[o + 7] = 0;
   out[o + 8] = sb * ca * sz;   out[o + 9] = -sa * sz; out[o + 10] = cb * ca * sz; out[o + 11] = 0;
   out[o + 12] = px;            out[o + 13] = py;      out[o + 14] = pz;           out[o + 15] = 1;
+}
+
+/**
+ * どの形にするか（spec.kinds の添字）。同じ形ばかりだと壁紙に見える。
+ * チャンク（buildScatterData）と島全体の遠景の木（island/forest.ts）が同じ関数を使い、
+ * 同じ場所に同じ形の木を置く。
+ */
+export function variantOf(spec: KindSpec, gx: number, gz: number): number {
+  const nv = spec.kinds.length;
+  return nv === 1 ? 0 : Math.min(nv - 1, (hash2(gx, gz, spec.salt + 9) * nv) | 0);
+}
+
+/**
+ * 1 本分の行列と色を書き込む。巨木・向き・傾き・縦の伸び・色むらは候補の格子番号だけで決まる。
+ * チャンクと島全体の遠景の木が同じ関数を使うので、近づいて本物の木に切り替わっても位置も形も飛ばない。
+ */
+export function writeInstance(
+  spec: KindSpec,
+  gx: number,
+  gz: number,
+  scale: number,
+  px: number,
+  py: number,
+  pz: number,
+  matrices: Float32Array,
+  index: number,
+  colors: Float32Array,
+): void {
+  // たまに巨木。大きさが揃っていると並木に見えるので、対比を作る。
+  if (spec.giantChance) {
+    const g = hash2(gx, gz, spec.salt + 8);
+    if (g < spec.giantChance) scale *= mix(GIANT_MIN, GIANT_MAX, g / spec.giantChance);
+  }
+  const yaw = hash2(gx, gz, spec.salt + 3) * Math.PI * 2;
+  // わずかに傾いている方が並木らしくならず自然に見える。
+  const tilt = (hash2(gx, gz, spec.salt + 4) - 0.5) * 0.14;
+  const sy = scale * (0.85 + hash2(gx, gz, spec.salt + 5) * 0.4);
+  composeInto(matrices, index * 16, px, py, pz, yaw, tilt, scale, sy, scale);
+
+  // 明るさに加えて色相も振る。以前は明度だけだったので、同じ緑が
+  // 並んで壁紙に見えていた。黄緑〜青緑に散らすと森らしくなる。
+  const bright = 0.82 + hash2(gx, gz, spec.salt + 6) * 0.36;
+  const hue = hash2(gx, gz, spec.salt + 7) - 0.5;
+  const tint = spec.tint ?? DEFAULT_TINT;
+  colors[index * 3] = bright * tint[0] * (1 + hue * 0.16);
+  colors[index * 3 + 1] = bright * tint[1];
+  colors[index * 3 + 2] = bright * tint[2] * (1 - hue * 0.18);
 }
 
 /**
@@ -258,33 +306,9 @@ export function buildScatterData(
         let scale = spec.place(CTX);
         if (scale <= 0) continue;
 
-        // たまに巨木。大きさが揃っていると並木に見えるので、対比を作る。
-        if (spec.giantChance) {
-          const g = hash2(gx, gz, spec.salt + 8);
-          if (g < spec.giantChance) scale *= mix(GIANT_MIN, GIANT_MAX, g / spec.giantChance);
-        }
-
-        // どの形にするか。同じ形ばかりだと壁紙に見える。
-        const v = nv === 1 ? 0 : Math.min(nv - 1, (hash2(gx, gz, spec.salt + 9) * nv) | 0);
-        const matrices = mats[v];
-        const colors = cols[v];
-        const count = counts[v];
-
-        const yaw = hash2(gx, gz, spec.salt + 3) * Math.PI * 2;
-        // わずかに傾いている方が並木らしくならず自然に見える。
-        const tilt = (hash2(gx, gz, spec.salt + 4) - 0.5) * 0.14;
-        const sy = scale * (0.85 + hash2(gx, gz, spec.salt + 5) * 0.4);
-        composeInto(matrices, count * 16, x - ox, h - 0.25, z - oz, yaw, tilt, scale, sy, scale);
-
-        // 明るさに加えて色相も振る。以前は明度だけだったので、同じ緑が
-        // 並んで壁紙に見えていた。黄緑〜青緑に散らすと森らしくなる。
-        const bright = 0.82 + hash2(gx, gz, spec.salt + 6) * 0.36;
-        const hue = hash2(gx, gz, spec.salt + 7) - 0.5;
-        const tint = spec.tint ?? DEFAULT_TINT;
-        colors[count * 3] = bright * tint[0] * (1 + hue * 0.16);
-        colors[count * 3 + 1] = bright * tint[1];
-        colors[count * 3 + 2] = bright * tint[2] * (1 - hue * 0.18);
-        counts[v] = count + 1;
+        const v = variantOf(spec, gx, gz);
+        writeInstance(spec, gx, gz, scale, x - ox, h - 0.25, z - oz, mats[v], counts[v], cols[v]);
+        counts[v]++;
       }
     }
 

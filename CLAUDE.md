@@ -31,25 +31,32 @@
 ## 構成
 
 ```
-src/island/   生成（決定性の決まりの内側）
+src/island/   島全体の計算（決定性の決まりの内側）
   params.ts     つまみと URL
-  grid.ts       格子・近傍・ヒープ
-  shape.ts      輪郭と山脈の骨格
-  erosion.ts    水滴の侵食
-  hydrology.ts  湖と川
-  climate.ts    気温・湿り気・雨陰
-  generate.ts   工程をつなぐ入口
-  worker.ts     Worker で計算する
-src/view/     表示（上から見た島）
+  grid.ts       島の大きさ（4km）・格子・近傍・ヒープ
+  landscape.ts  隆起させた山を川が削る（FastScape 型の侵食、16m 格子）
+  hydrology.ts  湖と川（水を満たし、流れを集める）
+  forest.ts     島全体の木（近くのチャンクと同じ規則・乱数）
+  generate.ts   工程をつなぐ入口 / worker.ts  Worker で計算する
+src/world/    1 点ずつ引く地形と気候（stroll から持ってきたもの＋島用）
+  islandShape.ts  大きな形の 3 次補間＋細部 / islandWater.ts  水の格子を引く
+  terrain.ts      公開窓口（描画・植生・プレイヤーはこれだけを見る）
+  chunk.ts・scatter.ts・climate.ts・surfaceShade.ts ほか  stroll の資産
+src/render/   見渡す島と遠景（overviewMesh.ts）、遠目の木（farForest.ts）、
+              近くのチャンク（chunkManager.ts）、空・水・木の形（stroll の資産）
 ```
 
-つまみを動かしている間は粗い格子（`PREVIEW_RES` 257）で下見し、
-離したら本番の格子（`FULL_RES` 513、12m 間隔）で描き直す。
+- つまみを動かしている間は粗い格子（侵食 129・見渡す島 257）で下見し、
+  離したら本番（侵食 257＝16m・見渡す島 769＝約 5m）で作り直し、木も植える
+- 飛んでいる間、近くはチャンク（足元 2m・本物の木）、遠くは島全体の 1 枚と遠目の木。
+  チャンクのできている所を coverage テクスチャで知らせ、重なりも穴も出さない
+- stroll の標高の式で作る平らで広いワールドは、タグ `flat-world-v1`（ブランチ `flat-world`）に残してある
 
 ## stroll から引き継いだ教訓（該当する部分を足すときに読む）
 
 - smoothstep の最大傾斜は平均の 1.5 倍。「高さ H を幅 W で落とす」は 1.5×H/W になる
-- 水面とほぼ同じ高さの平らな岸は、深度の精度が足りずチラつく
+- 水面とほぼ同じ高さの平らな岸は、深度の精度が足りずチラつく。見渡すカメラは数 km 離れるので、
+  near を距離に合わせて上げる（main.ts の fitNearPlane）
 - **`reversedDepthBuffer` を使わない。** three r185 で有効にすると、遠くの陸の上に海の板が
   かぶって島の奥半分が白く覆われた。polygonOffset の向きを直しても消えず、原因は未特定
 - 湖の底を海面より下げない。海の板が湖の中に見えて水面が二重になる

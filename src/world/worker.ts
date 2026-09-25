@@ -2,6 +2,7 @@
 import { LOD_STEPS, buildChunkArrays } from './chunk';
 import { buildScatterData } from './scatter';
 import type { IslandParams } from '../island/params';
+import type { LandscapeArrays } from './islandShape';
 import { type IslandWaterArrays, IslandWater } from './islandWater';
 import { Terrain } from './terrain';
 
@@ -16,6 +17,8 @@ export interface BuildRequest {
 export interface InitRequest {
   type: 'init';
   params: IslandParams;
+  /** 島の大きな形（隆起と侵食）。 */
+  landscape: LandscapeArrays;
   /** 島全体の格子で求めた水（湖・川・彫った量）。 */
   water: IslandWaterArrays;
 }
@@ -48,7 +51,7 @@ self.onmessage = (ev: MessageEvent<WorkerRequest>) => {
   const msg = ev.data;
 
   if (msg.type === 'init') {
-    terrain = new Terrain(msg.params, new IslandWater(msg.water));
+    terrain = new Terrain(msg.params, msg.landscape, new IslandWater(msg.water));
     return;
   }
 
