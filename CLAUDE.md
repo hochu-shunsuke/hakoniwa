@@ -37,6 +37,7 @@ src/island/   島全体の計算（決定性の決まりの内側）
   landscape.ts  隆起させた山を川が削る（FastScape 型の侵食、16m 格子）
   hydrology.ts  湖と川（水を満たし、流れを集める）
   forest.ts     島全体の木（近くのチャンクと同じ規則・乱数）
+  overviewArrays.ts  見渡す島の 1 枚の中身（Worker で作る）
   generate.ts   工程をつなぐ入口 / worker.ts  Worker で計算する
 src/world/    1 点ずつ引く地形と気候（stroll から持ってきたもの＋島用）
   islandShape.ts  大きな形の 3 次補間＋細部 / islandWater.ts  水の格子を引く
@@ -94,9 +95,31 @@ src/render/   見渡す島と遠景（overviewMesh.ts）、遠目の木（farFor
   影は暗くするだけでなく空の青い光を足す（直接光を消すだけだと、低い朝日で島の半分が濁った）
 - **規則的な縞を入れない。** 岩の地層を高さの sin で入れたら、斜面に等間隔の横縞が並んで模様に見えた
 
+## 速さ（開いてから島が見えるまで）
+
+- **見せるのに要る物から順に送る**（`island/worker.ts`）。島＋見渡す島の 1 枚＋地図 → 木 → 光。
+  見渡す島の 1 枚（59 万頂点の色付け、約 1 秒）は Worker で作る（`island/overviewArrays.ts`）。
+  画面側で作ると、その間 画面が止まっていた
+- **開いたら先に粗い下見を出し、続けて本番の細かさで作り直す**（`main.ts` の最後）
+- **侵食の隣は番号の差で引く**（`landscape.ts` の `nOff`）。`for (const [di, dj, dd] of NEIGHBORS8)` の
+  分解だけで侵食全体の 8 割（1.3 秒）を使っていた。書き方を変えても計算の順番と値は同じなので島は変わらない
+- 測った値（M3）: 島が見えるまで 0.6 秒、入れるまで 1.7 秒（直す前は両方 2.9 秒）。stroll は約 0.8 秒で入れる。
+  差の根は作り方の違い（stroll は足元の 9 区画だけ、hakoniwa は島全体の侵食・川・気候を先に計算する）
+
+## 画面と操作（stroll と揃える）
+
+- **見た目と操作は stroll と同じにする**（`src/ui/overlay.ts`・`src/ui/touch.ts`・`player/controller.ts`）。
+  ガラスのカード・丸いボタン・折りたたみの操作説明、Pointer Lock とタッチの切り替え、
+  iOS Safari の入力の誤報への備え（`resolveEntryPointerType`）、Esc で休憩、最初の 15 秒の操作ガイド、
+  速度と高度の表示、AUTO、速さで広がる視野、高度で薄くなる霧。stroll 側を直したらこちらも揃える
+- カードは島を隠さない（PC は左、スマホは下）。見渡すときはカメラの中心をずらして、
+  カードの外の空いた所の真ん中に島を映す（`main.ts` の `frameIsland`）。入口のボタンはカードの下に固定
+- 休憩すると見渡す画面に戻り、つまみを触れる。続きは休憩した場所から飛ぶ
+- サイコロは合言葉もつまみも全部振り直す（端の極端な島を避けて 10〜90）
+
 ## コマンド
 
 ```bash
 npm run dev   # http://localhost:5173（LAN 公開）
-npm run ci    # 型・ビルド・テスト
+npm run ci    # 型・ビルド（テストはまだ無い）
 ```

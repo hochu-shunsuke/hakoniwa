@@ -1,14 +1,23 @@
 /// <reference lib="webworker" />
-import { type ForestBatch, plantForest } from './forest';
-import { type Island, generateIsland } from './generate';
+import { type IslandMap, renderIslandMap } from '../view/mapView';
 import { IslandWater } from '../world/islandWater';
 import { Terrain } from '../world/terrain';
+import { type ForestBatch, plantForest } from './forest';
+import { type Island, generateIsland } from './generate';
 import { FULL_RES } from './grid';
 import { type IslandLighting, bakeLighting } from './lighting';
+import { type OverviewArrays, buildOverviewArrays, buildOverviewWaterArray } from './overviewArrays';
 import type { IslandParams } from './params';
 
 /**
  * 島の計算は数百 ms かかるので Worker で行う。つまみを動かしても画面が固まらない。
+ *
+ * 見せるのに要る物から順に送る。
+ *   1. 島（標高・水・気候）と、見渡す島の 1 枚・小さな地図の中身 → 画面に島が出る
+ *   2. 島全体の木（本番の格子だけ）
+ *   3. 焼き込んだ光（太陽の影と空の見え方）
+ * 以前は木を植え終えてから島を送り、見渡す島の 1 枚は画面側で組み立てていた（約 1 秒、
+ * その間 画面が止まる）。木と光は島が見えた後から届けば足りる。
  */
 
 export interface GenerateRequest {
@@ -27,13 +36,23 @@ export interface GenerateResult {
   island: Island;
   /** この島を作ったときのつまみ。計算中につまみが動いても、島と地形の式を食い違わせない。 */
   params: IslandParams;
-  /** 島全体の木。下見（粗い格子）では null。 */
-  forest: ForestBatch[] | null;
+  /** 見渡す島の 1 枚（render/overviewMesh.ts がそのまま貼る）と、その水面。 */
+  overview: OverviewArrays;
+  overviewWater: Float32Array | null;
+  map: IslandMap;
+  /** 島が見えるまでにかかった時間（ms）。 */
   ms: number;
 }
 
+/** 島全体の木。島を送った後に植えて、追いかけて送る（本番の格子だけ）。 */
+export interface ForestResult {
+  type: 'forest';
+  id: number;
+  forest: ForestBatch[];
+}
+
 /**
- * 島の光（太陽の影と空の見え方）。島を送った後に計算して、追いかけて送る。
+ * 島の光（太陽の影と空の見え方）。木の後に計算して、追いかけて送る。
  * 光の計算（本番の格子で約 0.3s）を待たずに島を見せるため。
  */
 export interface LightResult {
@@ -43,36 +62,47 @@ export interface LightResult {
   ms: number;
 }
 
+export type WorkerResult = GenerateResult | ForestResult | LightResult;
+
+const post = (msg: WorkerResult, transfer: Transferable[]) =>
+  (self as unknown as Worker).postMessage(msg, transfer);
+
 self.onmessage = (ev: MessageEvent<GenerateRequest>) => {
   const { id, params, n, erosionN, sun } = ev.data;
   const started = performance.now();
   const island = generateIsland(params, n, erosionN);
-  // 木は指を離して本番の格子で作ったときだけ。下見の間は地形の形だけを見せる。
-  const forest = n === FULL_RES
-    ? plantForest(new Terrain(params, island.landscape, new IslandWater(island.water)), island)
-    : null;
-  const result: GenerateResult = { type: 'island', id, island, params, forest, ms: performance.now() - started };
-  // 光は島の高さから計算する。高さの配列は下で手放すので、先に写しておく。
+  const terrain = new Terrain(params, island.landscape, new IslandWater(island.water));
+  const overview = buildOverviewArrays(island, terrain);
+  const overviewWater = buildOverviewWaterArray(island);
+  const map = renderIslandMap(island, terrain);
+
+  // 木と光は送った後にも島の細かい格子を読むので、手放す前に写しておく。
+  // 大きな形と水（landscape・water）は地形（terrain）が読み続けるので、転送せず写しで送る。
   const height = island.height.slice();
-  const cell = island.cell;
-  (self as unknown as Worker).postMessage(result, [
+  const moisture = island.moisture.slice();
+  post({ type: 'island', id, island, params, overview, overviewWater, map, ms: performance.now() - started }, [
     island.height.buffer,
     island.waterLevel.buffer,
     island.waterKind.buffer,
     island.temperature.buffer,
     island.moisture.buffer,
-    island.landscape.height.buffer,
-    island.landscape.slope.buffer,
-    island.landscape.curvature.buffer,
-    island.landscape.drainage.buffer,
-    island.water.carve.buffer,
-    island.water.level.buffer,
-    island.water.kind.buffer,
-    ...(forest ?? []).flatMap((b) => [b.matrices.buffer, b.colors.buffer]),
+    overview.position.buffer,
+    overview.normal.buffer,
+    overview.color.buffer,
+    overview.rock.buffer,
+    overview.surf.buffer,
+    overview.index.buffer,
+    ...(overviewWater ? [overviewWater.buffer] : []),
+    map.pixels.buffer,
   ]);
 
+  // 木は指を離して本番の格子で作ったときだけ。下見の間は地形の形だけを見せる。
+  if (n === FULL_RES) {
+    const forest = plantForest(terrain, { ...island, height, moisture });
+    post({ type: 'forest', id, forest }, forest.flatMap((b) => [b.matrices.buffer, b.colors.buffer]));
+  }
+
   const lit = performance.now();
-  const lighting = bakeLighting(height, n, cell, sun);
-  const light: LightResult = { type: 'light', id, lighting, ms: performance.now() - lit };
-  (self as unknown as Worker).postMessage(light, [lighting.data.buffer]);
+  const lighting = bakeLighting(height, n, island.cell, sun);
+  post({ type: 'light', id, lighting, ms: performance.now() - lit }, [lighting.data.buffer]);
 };

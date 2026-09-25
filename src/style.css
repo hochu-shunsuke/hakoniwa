@@ -1,40 +1,611 @@
+/*
+ * 見た目は stroll の開始画面と同じ言葉で揃える（ガラスのカード、字間を空けた見出し、丸いボタン、
+ * 折りたたみの操作説明、飛んでいる間の最小限の表示）。stroll と違うのは、カードが島を隠さないこと
+ * （PC は左に浮かべ、スマホは下から出す）。
+ */
 :root {
-  --panel: rgba(28, 36, 40, 0.86);
-  --ink: #e9efe9;
-  --muted: #a3b3ad;
-  --line: #3a474e;
-  --accent: #8fd1c1;
+  --ink: #eef2f3;
+  --muted: #b9c4c7;
+  --faint: #8ea0a6;
+  --glass: rgba(18, 27, 33, 0.62);
+  --edge: rgba(255, 255, 255, 0.08);
+  color-scheme: dark;
 }
-* { box-sizing: border-box; }
-html, body { margin: 0; height: 100%; overflow: hidden; background: #86a3b8; color: var(--ink);
-  font: 14px/1.5 system-ui, -apple-system, "Hiragino Sans", sans-serif; }
-#view { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; touch-action: none; }
-#panel { position: fixed; left: 12px; top: 12px; bottom: 12px; width: 268px; padding: 18px 16px;
-  background: var(--panel); backdrop-filter: blur(8px); border-radius: 12px; overflow-y: auto;
-  display: flex; flex-direction: column; gap: 12px; }
-h1 { margin: 0; font-size: 20px; letter-spacing: 0.08em; }
-.lead { margin: -8px 0 2px; color: var(--muted); font-size: 12px; }
-.hint { margin: 0; color: var(--muted); font-size: 11px; }
-.row { display: flex; gap: 8px; }
-input.seed { flex: 1; min-width: 0; font: 13px ui-monospace, monospace; color: var(--ink);
-  background: rgba(0, 0, 0, 0.25); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
-button { font: inherit; color: var(--ink); background: rgba(255, 255, 255, 0.08); border: 1px solid var(--line);
-  border-radius: 8px; padding: 7px 12px; cursor: pointer; }
-button:hover { border-color: var(--accent); }
-button:disabled { opacity: 0.5; cursor: default; }
-button.primary { background: #2f6b5e; font-size: 16px; padding: 10px; border-color: #4f9d8b; }
-.slider { display: block; }
-.slider-title { font-size: 13px; margin-bottom: 1px; }
-.slider input { width: 100%; accent-color: var(--accent); }
-.ends { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; }
-#minimap { width: 100%; aspect-ratio: 1; border-radius: 8px; image-rendering: auto; }
-#status { position: fixed; right: 12px; bottom: 10px; color: rgba(255, 255, 255, 0.8); font-size: 11px;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5); }
-#back { position: fixed; left: 12px; top: 12px; display: none; background: var(--panel); }
-body.flying #panel { display: none; }
-body.flying #back { display: block; }
-:root[data-input='touch'] .hint { display: none; }
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  /* 指で操作するので、引っぱって更新・つまんで拡大・端の跳ね返りを全部止める。 */
+  overscroll-behavior: none;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  background: #86a3b8;
+  font-family: ui-sans-serif, system-ui, -apple-system, 'Hiragino Sans', 'Noto Sans JP', sans-serif;
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+}
+
+#view {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+#ui {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+  border-radius: 999px;
+  transition: background 200ms ease, border-color 200ms ease, opacity 200ms ease, transform 120ms ease;
+}
+
+/* ---- つくる・休憩のカード ---- */
+
+.panel {
+  position: absolute;
+  left: max(20px, env(safe-area-inset-left));
+  top: max(20px, env(safe-area-inset-top));
+  bottom: max(20px, env(safe-area-inset-bottom));
+  width: 340px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  text-align: center;
+  background: var(--glass);
+  border: 1px solid var(--edge);
+  border-radius: 22px;
+  backdrop-filter: blur(10px);
+  box-shadow: 0 10px 40px rgba(4, 10, 14, 0.25);
+  pointer-events: auto;
+  transition: opacity 450ms ease, visibility 450ms, transform 450ms ease;
+}
+
+/* つまみは中でスクロールし、入口のボタンは常に下に見えている。 */
+.panel-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+  scrollbar-width: none;
+  padding: 30px 26px 22px;
+}
+
+.panel-body::-webkit-scrollbar {
+  display: none;
+}
+
+.panel-foot {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 16px 26px 14px;
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.panel.hidden {
+  opacity: 0;
+  visibility: hidden;
+  transform: translateX(-12px);
+}
+
+.brand {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.panel h1 {
+  margin: 0;
+  font-size: 26px;
+  font-weight: 500;
+  letter-spacing: 0.24em;
+  text-indent: 0.24em;
+}
+
+.lead {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--muted);
+}
+
+.lead:empty {
+  display: none;
+}
+
+/* ---- 入力欄 ---- */
+
+.fields {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  text-align: left;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.field-label {
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  color: var(--faint);
+}
+
+.hint {
+  margin: 2px 0 0;
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: #7d8e94;
+}
+
+.seed-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.seed-input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 15px;
+  letter-spacing: 0.12em;
+  color: var(--ink);
+  padding: 9px 13px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.06);
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.seed-input:focus {
+  outline: none;
+  border-color: rgba(255, 255, 255, 0.45);
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.seed-dice {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  font-size: 20px;
+  line-height: 1;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+}
+
+.seed-dice:hover {
+  color: var(--ink);
+  border-color: rgba(255, 255, 255, 0.4);
+}
+
+.seed-dice:active {
+  transform: rotate(-18deg);
+}
+
+/* ---- つまみ ---- */
+
+.sliders {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.slider {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.slider-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+
+.slider-value {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.slider input {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 22px;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+  touch-action: pan-x;
+}
+
+.slider input::-webkit-slider-runnable-track {
+  height: 3px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.slider input::-moz-range-track {
+  height: 3px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.slider input::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  margin-top: -6.5px;
+  border-radius: 50%;
+  background: #dfe9e6;
+  border: none;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+  transition: transform 120ms ease;
+}
+
+.slider input::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #dfe9e6;
+  border: none;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+}
+
+.slider input:active::-webkit-slider-thumb {
+  transform: scale(1.18);
+  background: #fff;
+}
+
+.slider input:focus {
+  outline: none;
+}
+
+.slider-ends {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px;
+  color: #7d8e94;
+}
+
+.minimap {
+  width: 100%;
+  aspect-ratio: 1;
+  border-radius: 14px;
+  border: 1px solid var(--edge);
+}
+
+/* ---- ボタン ---- */
+
+.start {
+  align-self: center;
+  min-width: 210px;
+  padding: 13px 32px;
+  font-size: 14.5px;
+  color: #10201f;
+  background: #dfe9e6;
+  border: none;
+}
+
+.start:hover:not(:disabled) {
+  background: #fff;
+}
+
+.start:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.start:disabled {
+  cursor: default;
+  opacity: 0.45;
+  background: rgba(223, 233, 230, 0.3);
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.share {
+  align-self: center;
+  padding: 7px 16px;
+  font-size: 11.5px;
+  color: var(--muted);
+  background: transparent;
+  border: none;
+}
+
+.share:hover {
+  color: var(--ink);
+}
+
+.status {
+  margin: 0;
+  font-size: 10px;
+  color: #6f8087;
+  font-variant-numeric: tabular-nums;
+}
+
+.status:empty {
+  display: none;
+}
+
+/* ---- 操作の説明（折りたたみ） ---- */
+
+.controls {
+  font-size: 11px;
+  color: var(--faint);
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+  padding-top: 18px;
+}
+
+.controls summary {
+  cursor: pointer;
+  list-style: none;
+  letter-spacing: 0.14em;
+  color: #7d8e94;
+  user-select: none;
+}
+
+.controls summary::-webkit-details-marker {
+  display: none;
+}
+
+.controls summary::after {
+  content: ' ＋';
+  opacity: 0.6;
+}
+
+.controls[open] summary::after {
+  content: ' －';
+}
+
+.keys {
+  list-style: none;
+  margin: 16px 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px 14px;
+  color: var(--muted);
+}
+
+.keys li {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.controls-note {
+  margin: 12px 0 0;
+  line-height: 1.6;
+  color: #7d8e94;
+}
+
+kbd {
+  font: inherit;
+  font-size: 10px;
+  min-width: 19px;
+  padding: 3px 5px;
+  text-align: center;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.13);
+}
+
+/* ---- 飛んでいる間 ---- */
+
+.hud {
+  position: absolute;
+  left: 16px;
+  bottom: 14px;
+  font-size: 10.5px;
+  letter-spacing: 0.12em;
+  color: rgba(255, 255, 255, 0.42);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+  transition: opacity 500ms ease;
+}
+
+.hud.dim {
+  opacity: 0;
+}
+
+.flight-hud {
+  position: absolute;
+  left: 50%;
+  top: max(18px, env(safe-area-inset-top));
+  transform: translateX(-50%);
+  padding: 6px 11px;
+  border-radius: 999px;
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  color: rgba(255, 255, 255, 0.72);
+  background: rgba(12, 20, 26, 0.28);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
+  opacity: 0;
+  transition: opacity 250ms ease;
+}
+
+.flight-hud.on {
+  opacity: 1;
+}
+
+.keyboard-guide {
+  position: absolute;
+  left: 50%;
+  bottom: max(42px, calc(env(safe-area-inset-bottom) + 24px));
+  width: min(760px, calc(100vw - 32px));
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 7px 14px;
+  padding: 10px 16px;
+  border-radius: 14px;
+  color: rgba(255, 255, 255, 0.72);
+  background: rgba(12, 20, 26, 0.48);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 5px 24px rgba(4, 10, 14, 0.16);
+  backdrop-filter: blur(6px);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
+  opacity: 0;
+  transform: translate(-50%, 8px);
+  transition: opacity 350ms ease, transform 350ms ease;
+}
+
+.keyboard-guide span {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+  font-size: 10.5px;
+}
+
+.keyboard-guide kbd {
+  color: rgba(255, 255, 255, 0.9);
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.keyboard-guide.on {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+.toast {
+  position: absolute;
+  left: 50%;
+  bottom: 42px;
+  transform: translate(-50%, 8px);
+  max-width: min(90vw, 360px);
+  text-align: center;
+  padding: 9px 16px;
+  border-radius: 999px;
+  font-size: 12px;
+  background: rgba(12, 20, 26, 0.8);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  opacity: 0;
+  transition: opacity 300ms ease, transform 300ms ease;
+}
+
+.toast.on {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+.keyboard-guide.on + .toast {
+  bottom: 106px;
+}
+
+/* 指では細かい操作ができないので、当たり判定と字を大きくする。
+   条件は JS が決めた結果（data-input）を見る。メディアクエリで独立に
+   判定すると、JS 側の判断と食い違って中途半端な画面になる。 */
+:root[data-input='touch'] {
+  .start {
+    padding: 15px 36px;
+    font-size: 15.5px;
+  }
+
+  /* iOS は 16px 未満の入力欄に触れると画面を拡大する。 */
+  .seed-input {
+    font-size: 16px;
+  }
+
+  .seed-dice {
+    width: 40px;
+    height: 40px;
+    font-size: 22px;
+  }
+
+  .slider input {
+    height: 30px;
+  }
+
+  .slider input::-webkit-slider-thumb {
+    width: 22px;
+    height: 22px;
+    margin-top: -9.5px;
+  }
+
+  /* 操作の説明はタッチ端末では出さない。触れば分かるうえ、狭い画面では場所を食う。 */
+  .controls,
+  .keyboard-guide {
+    display: none;
+  }
+}
+
+/* スマホ: カードは下から出す。上半分で島が見えるように、高さを抑えて中をスクロールさせる。 */
 @media (max-width: 720px) {
-  #panel { top: auto; left: 8px; right: 8px; bottom: 8px; width: auto; max-height: 46vh; }
-  #minimap { display: none; }
+  .panel {
+    left: max(10px, env(safe-area-inset-left));
+    right: max(10px, env(safe-area-inset-right));
+    top: auto;
+    bottom: max(10px, env(safe-area-inset-bottom));
+    width: auto;
+    max-height: 52vh;
+  }
+
+  .panel-body {
+    gap: 18px;
+    padding: 20px 20px 16px;
+  }
+
+  .panel-foot {
+    padding: 12px 20px 10px;
+  }
+
+  .panel.hidden {
+    transform: translateY(16px);
+  }
+
+  .panel h1 {
+    font-size: 22px;
+  }
+
+  .brand {
+    gap: 6px;
+  }
+
+  .minimap {
+    display: none;
+  }
+
+  .keyboard-guide {
+    gap: 6px 10px;
+    padding-inline: 12px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .panel,
+  .keyboard-guide,
+  .toast {
+    transition: none;
+  }
 }

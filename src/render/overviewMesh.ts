@@ -1,9 +1,6 @@
 import * as THREE from 'three';
-import type { Island } from '../island/generate';
-import { gridToWorld } from '../island/ground';
+import type { OverviewArrays } from '../island/overviewArrays';
 import { CHUNK_SIZE } from '../world/chunk';
-import { SURFACE_STRIDE } from '../world/islandSurface';
-import { type Terrain, splitsAlongMainDiagonal } from '../world/terrain';
 import { COVERAGE_OFFSET, COVERAGE_SIZE } from './chunkManager';
 import { RENDER_ORDER } from './order';
 import { createTerrainMaterial } from './terrainMaterial';
@@ -11,7 +8,7 @@ import { createTerrainMaterial } from './terrainMaterial';
 /**
  * 島全体を 1 枚で描く（12m 格子）。「つくる」で見渡す島であり、飛んでいる間の遠景でもある。
  *
- * 地面の色は近くのチャンクと同じ Terrain.shade（stroll の気候帯の色）。
+ * 中身の配列は Worker が作る（island/overviewArrays.ts）。地面の色は近くのチャンクと同じ。
  * 飛んでいる間は、近くのチャンクができている所を描かない（coverage）。
  * 重ねて描くと 2 枚の地面が深度を奪い合ってチラつき、消すと読み込み中に穴が開くため。
  */
@@ -35,121 +32,6 @@ const COVERAGE_GLSL = /* glsl */ `
     return texture2D(uCoverage, (c + 0.5) / ${COVERAGE_SIZE.toFixed(1)}).r > 0.25;
   }
 `;
-
-export function buildOverviewTerrain(island: Island, terrain: Terrain): THREE.BufferGeometry {
-  const { n, cell, height, temperature, moisture } = island;
-  const position = new Float32Array(n * n * 3);
-  const normal = new Float32Array(n * n * 3);
-  const color = new Float32Array(n * n * 3);
-  const rock = new Float32Array(n * n * 3);
-  const surf = new Float32Array(n * n * 3);
-  const layers = new Float32Array(SURFACE_STRIDE);
-  const at = (i: number, j: number) =>
-    height[Math.max(0, Math.min(n - 1, j)) * n + Math.max(0, Math.min(n - 1, i))];
-  for (let j = 0; j < n; j++) {
-    const z = gridToWorld(j, n);
-    for (let i = 0; i < n; i++) {
-      const k = j * n + i;
-      const x = gridToWorld(i, n);
-      const h = height[k];
-      position[k * 3] = x;
-      position[k * 3 + 1] = h;
-      position[k * 3 + 2] = z;
-      // 法線と傾きは chunk.ts と同じ中心差分で取る。
-      const dx = (at(i + 1, j) - at(i - 1, j)) / (2 * cell);
-      const dz = (at(i, j + 1) - at(i, j - 1)) / (2 * cell);
-      const len = Math.sqrt(dx * dx + 1 + dz * dz);
-      normal[k * 3] = -dx / len;
-      normal[k * 3 + 1] = 1 / len;
-      normal[k * 3 + 2] = -dz / len;
-      const slope = Math.min(1, Math.sqrt(dx * dx + dz * dz));
-      terrain.surface(x, z, h, slope, temperature[k], moisture[k], terrain.specialAt(x, z), terrain.patchAt(x, z), layers, 0);
-      for (let c = 0; c < 3; c++) {
-        color[k * 3 + c] = layers[c];
-        rock[k * 3 + c] = layers[3 + c];
-        surf[k * 3 + c] = layers[6 + c];
-      }
-    }
-  }
-
-  const index = new Uint32Array((n - 1) * (n - 1) * 6);
-  let o = 0;
-  for (let j = 0; j < n - 1; j++) {
-    for (let i = 0; i < n - 1; i++) {
-      const a = j * n + i;
-      const b = a + 1;
-      const d = a + n;
-      const e = d + 1;
-      // チャンクと同じ割り方（高低差の小さい対角線）。
-      if (splitsAlongMainDiagonal(height[a], height[b], height[d], height[e])) {
-        index[o++] = a;
-        index[o++] = d;
-        index[o++] = e;
-        index[o++] = a;
-        index[o++] = e;
-        index[o++] = b;
-      } else {
-        index[o++] = a;
-        index[o++] = d;
-        index[o++] = b;
-        index[o++] = d;
-        index[o++] = e;
-        index[o++] = b;
-      }
-    }
-  }
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.BufferAttribute(position, 3));
-  geo.setAttribute('normal', new THREE.BufferAttribute(normal, 3));
-  geo.setAttribute('color', new THREE.BufferAttribute(color, 3));
-  geo.setAttribute('rock', new THREE.BufferAttribute(rock, 3));
-  geo.setAttribute('surf', new THREE.BufferAttribute(surf, 3));
-  geo.setIndex(new THREE.BufferAttribute(index, 1));
-  geo.computeBoundingSphere();
-  return geo;
-}
-
-/**
- * 湖と川の水面。水のある格子に角が 1 つでも触れる四角形に張る。
- * 水の無い角は、同じ四角形の水のある角の高さの平均に置く。水面は岸の下まで伸びて
- * 地形に隠れ、水際の線は地形との交わりで決まる。川は下流へ下る斜めの水面になる。
- */
-export function buildOverviewWater(island: Island): THREE.BufferGeometry | null {
-  const { n, waterLevel } = island;
-  const pos: number[] = [];
-  const lv = new Float32Array(4);
-  for (let j = 0; j < n - 1; j++) {
-    for (let i = 0; i < n - 1; i++) {
-      const ks = [j * n + i, j * n + i + 1, (j + 1) * n + i, (j + 1) * n + i + 1];
-      let sum = 0;
-      let wet = 0;
-      for (let q = 0; q < 4; q++) {
-        const v = waterLevel[ks[q]];
-        if (Number.isFinite(v)) {
-          sum += v;
-          wet++;
-        }
-      }
-      if (wet === 0) continue;
-      const fill = sum / wet;
-      for (let q = 0; q < 4; q++) {
-        const v = waterLevel[ks[q]];
-        lv[q] = Number.isFinite(v) ? v : fill;
-      }
-      const x0 = gridToWorld(i, n);
-      const x1 = gridToWorld(i + 1, n);
-      const z0 = gridToWorld(j, n);
-      const z1 = gridToWorld(j + 1, n);
-      pos.push(x0, lv[0], z0, x0, lv[2], z1, x1, lv[3], z1);
-      pos.push(x0, lv[0], z0, x1, lv[3], z1, x1, lv[1], z0);
-    }
-  }
-  if (pos.length === 0) return null;
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pos), 3));
-  geo.computeBoundingSphere();
-  return geo;
-}
 
 /** 島全体の 1 枚と、その水面。飛んでいる間は近くのチャンクの所を描かない。 */
 export class OverviewMesh {
@@ -194,12 +76,23 @@ export class OverviewMesh {
     this.uniforms.uCoverageOn.value = texture ? 1 : 0;
   }
 
-  set(island: Island, terrain: Terrain): void {
+  /** Worker が作った配列（island/overviewArrays.ts）を貼る。 */
+  set(arrays: OverviewArrays, water: Float32Array | null): void {
     this.clear();
-    this.terrain = new THREE.Mesh(buildOverviewTerrain(island, terrain), this.terrainMaterial);
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(arrays.position, 3));
+    geo.setAttribute('normal', new THREE.BufferAttribute(arrays.normal, 3));
+    geo.setAttribute('color', new THREE.BufferAttribute(arrays.color, 3));
+    geo.setAttribute('rock', new THREE.BufferAttribute(arrays.rock, 3));
+    geo.setAttribute('surf', new THREE.BufferAttribute(arrays.surf, 3));
+    geo.setIndex(new THREE.BufferAttribute(arrays.index, 1));
+    geo.computeBoundingSphere();
+    this.terrain = new THREE.Mesh(geo, this.terrainMaterial);
     this.group.add(this.terrain);
-    const waterGeo = buildOverviewWater(island);
-    if (waterGeo) {
+    if (water) {
+      const waterGeo = new THREE.BufferGeometry();
+      waterGeo.setAttribute('position', new THREE.BufferAttribute(water, 3));
+      waterGeo.computeBoundingSphere();
       this.water = new THREE.Mesh(waterGeo, this.waterMaterial);
       this.water.renderOrder = RENDER_ORDER.water;
       this.group.add(this.water);

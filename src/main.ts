@@ -13,7 +13,7 @@ import {
   encodeParams,
   randomSeed,
 } from './island/params';
-import type { GenerateRequest, GenerateResult, LightResult } from './island/worker';
+import type { GenerateRequest, GenerateResult, WorkerResult } from './island/worker';
 import { Player } from './player/controller';
 import { ChunkManager } from './render/chunkManager';
 import { FarForest } from './render/farForest';
@@ -21,30 +21,46 @@ import { setIslandLight, updateIslandLight } from './render/islandLight';
 import { OverviewMesh } from './render/overviewMesh';
 import { MORNING, Sky } from './render/sky';
 import { Water } from './render/water';
-import { type TouchControls, createTouchControls, isTouchDevice } from './ui/touch';
-import { drawIsland } from './view/mapView';
+import { Overlay } from './ui/overlay';
+import { type TouchControls, createTouchControls, hasTouchInput, isTouchDevice } from './ui/touch';
+import { drawIslandMap } from './view/mapView';
 import { IslandWater } from './world/islandWater';
 import { Terrain } from './world/terrain';
 
 /**
- * 箱庭。「つくる」では島を見渡しながらつまみで形を変え、「飛ぶ」では鳥になって島を飛ぶ。
+ * island maker（リポジトリ名は hakoniwa）。カードのつまみで島を作りながら見渡し、
+ * 「この島へ入る」で鳥になって飛ぶ。
  * つまみと種は URL の `#` に載るので、URL を送れば同じ島を渡せる。
+ *
+ * 入口と操作は stroll と同じ（Pointer Lock とタッチの切り替え、iOS Safari の入力の誤報への備え、
+ * Esc で休憩、最初の 15 秒の操作ガイド、速度と高度の表示、AUTO、速さで広がる視野、
+ * 高度で薄くなる霧）。休憩すると島を見渡す画面へ戻り、つまみを触れる。
  */
 
 const LOOK_SENSITIVITY = 0.0022;
 /** 霧。見渡すときは島全体が見えるよう薄く、飛ぶときは奥行きが出るよう少し濃く。 */
 const FOG_MAKE = 0.00007;
 const FOG_FLY = 0.0002;
+/** 画素数の上限。端末名で分けず、画面の大きさと入力方式で決める（stroll と同じ）。 */
+const MOBILE_PIXEL_BUDGET = 1_400_000;
+const DESKTOP_PIXEL_BUDGET = 8_000_000;
+/** 見渡すときの視野（度）。飛ぶときは stroll と同じく 68°〜82°＋速さ。 */
+const MAKE_FOV = 55;
+
+interface WakeLockSentinelLike {
+  release(): Promise<void>;
+}
+interface WakeLockNavigator {
+  wakeLock?: { request(type: 'screen'): Promise<WakeLockSentinelLike> };
+}
 
 const canvas = document.getElementById('view') as HTMLCanvasElement;
-const panel = document.getElementById('panel')!;
-const status = document.getElementById('status')!;
-const minimap = document.getElementById('minimap') as HTMLCanvasElement;
-const flyButton = document.getElementById('fly') as HTMLButtonElement;
-const backButton = document.getElementById('back') as HTMLButtonElement;
 
-const touch = isTouchDevice();
-document.documentElement.dataset.input = touch ? 'touch' : 'keys';
+const preferredTouch = isTouchDevice();
+const touchCapable = hasTouchInput();
+let inputMode: 'touch' | 'keys' = preferredTouch ? 'touch' : 'keys';
+// 判定はここ 1 か所だけ。CSS もこの結果を見る。
+document.documentElement.dataset.input = inputMode;
 
 let params: IslandParams = decodeParams(location.hash);
 
@@ -60,7 +76,7 @@ renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.05;
 
 const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(55, 1, 0.5, 60000);
+const camera = new THREE.PerspectiveCamera(MAKE_FOV, 1, 0.5, 60000);
 camera.rotation.order = 'YXZ';
 
 const sky = new Sky(scene, MORNING);
@@ -81,21 +97,53 @@ controls.minDistance = 250;
 controls.maxDistance = ISLAND_SIZE * 2;
 controls.update();
 
-function resize(): void {
-  const w = Math.max(1, innerWidth);
-  const h = Math.max(1, innerHeight);
-  renderer.setPixelRatio(Math.min(devicePixelRatio, touch ? 1.5 : 2));
-  renderer.setSize(w, h);
-  camera.aspect = w / h;
+/** スマホは画素密度が高い割に描画性能が低い。上限を下げて滑らかさを優先する。 */
+function resizeRenderer(): void {
+  const width = Math.max(1, innerWidth);
+  const height = Math.max(1, innerHeight);
+  const budget = inputMode === 'touch' ? MOBILE_PIXEL_BUDGET : DESKTOP_PIXEL_BUDGET;
+  const budgetRatio = Math.sqrt(budget / (width * height));
+  const deviceCap = inputMode === 'touch' ? 1.5 : 2;
+  renderer.setPixelRatio(Math.max(0.75, Math.min(devicePixelRatio, deviceCap, budgetRatio)));
+  renderer.setSize(width, height);
+  camera.aspect = width / height;
   camera.updateProjectionMatrix();
 }
-resize();
-addEventListener('resize', resize);
+resizeRenderer();
+
+// ── 画面 ───────────────────────────────────────────────
+const overlay = new Overlay(document.getElementById('ui')!, params, inputMode === 'touch', touchCapable, {
+  onStart: (pointerType) => handleStart(pointerType),
+  onSeed: (seed) => {
+    params.seed = cleanSeed(seed) || params.seed;
+    overlay.setParams(params);
+    commit();
+  },
+  onParam: (key, value, final) => {
+    params[key] = value;
+    if (final) commit();
+    else request(PREVIEW_RES);
+  },
+  // サイコロ: 種もつまみも全部振り直して、まったく別の島を引く。
+  onRandom: () => {
+    params = { ...params, seed: randomSeed() };
+    for (const spec of PARAM_SPECS) params[spec.key] = randomParam();
+    overlay.setParams(params);
+    commit();
+  },
+});
+
+/** サイコロのつまみ。端（0 や 100）は極端な島になりやすいので、少し内側から引く。 */
+function randomParam(): number {
+  return Math.round(10 + Math.random() * 80);
+}
 
 // ── 島の計算 ───────────────────────────────────────────
 // Worker は 1 つ。計算中に新しい依頼が来たら最新の 1 件だけを取っておき、終わったら流す。
 const worker = new Worker(new URL('./island/worker.ts', import.meta.url), { type: 'module' });
 let nextId = 1;
+/** 最後に頼んだ島。これが描かれるまで「入る」を押せない（下見の島で飛ばない）。 */
+let lastRequested = 0;
 let busy = false;
 let pending: GenerateRequest | null = null;
 let drawnId = 0;
@@ -111,6 +159,8 @@ function request(n: number): void {
   const erosionN = n === FULL_RES ? EROSION_RES : EROSION_PREVIEW_RES;
   const sun = sky.sunDirection;
   const req: GenerateRequest = { id: nextId++, params: { ...params }, n, erosionN, sun: [sun.x, sun.y, sun.z] };
+  lastRequested = req.id;
+  overlay.setReady(false);
   if (busy) {
     pending = req;
     return;
@@ -119,23 +169,30 @@ function request(n: number): void {
   worker.postMessage(req);
 }
 
-function show(next: Island, made: IslandParams): void {
+function show(msg: GenerateResult): void {
+  const { island: next, params: made } = msg;
   island = next;
   madeParams = made;
   terrain = new Terrain(made, next.landscape, new IslandWater(next.water));
-  overview.set(next, terrain);
+  // 見渡す島の 1 枚と地図は Worker が作ってある。ここでは貼るだけ（画面を止めない）。
+  overview.set(msg.overview, msg.overviewWater);
+  drawIslandMap(overlay.minimap, msg.map);
   // 水深は川に合わせて彫った後の高さで測る。彫る前の高さだと川の中が浅瀬扱いになり、
   // 川幅いっぱいに岸の泡が立って雪の土手のように見えた。
   const carved = next.landscape.height.map((h, k) => h + next.water.carve[k]);
   water.setHeightMap(carved, next.landscape.n);
-  drawIsland(minimap, next, terrain);
   if (ground) ground.terrain = terrain;
   else ground = new IslandGround(terrain);
-  flyButton.disabled = false;
+  // 木は島の後から届く。古い島の木を残すと地形と食い違う。
+  farForest.clear();
 }
 
-worker.onmessage = (ev: MessageEvent<GenerateResult | LightResult>) => {
+worker.onmessage = (ev: MessageEvent<WorkerResult>) => {
   const msg = ev.data;
+  if (msg.type === 'forest') {
+    if (msg.id === drawnId) farForest.set(msg.forest);
+    return;
+  }
   if (msg.type === 'light') {
     // 光は島の後から届く。今見せている島の光だけを使う。
     if (msg.id === drawnId) setIslandLight(msg.lighting);
@@ -149,14 +206,12 @@ worker.onmessage = (ev: MessageEvent<GenerateResult | LightResult>) => {
     }
     return;
   }
-  const { id, island: next, ms, params: made, forest } = msg;
-  if (id > drawnId) {
-    drawnId = id;
-    show(next, made);
-    // 下見の間は古い島の木を残さない（地形と食い違う）。本番の格子で作り直したら植える。
-    if (forest) farForest.set(forest);
-    else farForest.clear();
-    status.textContent = `${next.n === FULL_RES ? '' : '下見 · '}${ms.toFixed(0)}ms`;
+  if (msg.id > drawnId) {
+    drawnId = msg.id;
+    show(msg);
+    const full = msg.island.n === FULL_RES;
+    overlay.setStatus(full ? `${(msg.ms / 1000).toFixed(1)} 秒で島をつくりました` : '下見しています…');
+    overlay.setReady(full && msg.id === lastRequested);
   }
 };
 
@@ -165,123 +220,107 @@ function commit(): void {
   request(FULL_RES);
 }
 
-// ── つまみ ─────────────────────────────────────────────
-const seedInput = document.createElement('input');
-seedInput.className = 'seed';
-seedInput.value = params.seed;
-seedInput.spellcheck = false;
-seedInput.addEventListener('change', () => {
-  params.seed = cleanSeed(seedInput.value) || params.seed;
-  seedInput.value = params.seed;
-  commit();
-});
-const reroll = document.createElement('button');
-reroll.textContent = '別の島';
-reroll.addEventListener('click', () => {
-  params.seed = randomSeed();
-  seedInput.value = params.seed;
-  commit();
-});
-const seedRow = document.createElement('div');
-seedRow.className = 'row';
-seedRow.append(seedInput, reroll);
-panel.insertBefore(seedRow, minimap);
+// ── 飛ぶ（入口と操作は stroll と同じ） ─────────────────
+/** 飛んでいる最中か。PC はポインタロックの有無と一致するが、タッチにはロックが無いので状態で持つ。 */
+let playing = false;
+let entered = false;
+let touchControls: TouchControls | null = null;
+let wakeLock: WakeLockSentinelLike | null = null;
+let lastAutoFlight = false;
 
-for (const spec of PARAM_SPECS) {
-  const wrap = document.createElement('label');
-  wrap.className = 'slider';
-  const title = document.createElement('div');
-  title.className = 'slider-title';
-  title.textContent = spec.label;
-  const input = document.createElement('input');
-  input.type = 'range';
-  input.min = '0';
-  input.max = '100';
-  input.value = String(params[spec.key]);
-  const ends = document.createElement('div');
-  ends.className = 'ends';
-  ends.innerHTML = `<span>${spec.low}</span><span>${spec.high}</span>`;
-  // 動かしている間は粗い格子で下見し、離したら細かい格子で作り直す。
-  input.addEventListener('input', () => {
-    params[spec.key] = Number(input.value);
-    request(PREVIEW_RES);
-  });
-  input.addEventListener('change', () => {
-    params[spec.key] = Number(input.value);
-    commit();
-  });
-  wrap.append(title, input, ends);
-  panel.insertBefore(wrap, minimap);
+function setInputMode(next: 'touch' | 'keys'): void {
+  if (inputMode === next) return;
+  inputMode = next;
+  if (next === 'touch' && document.pointerLockElement) document.exitPointerLock();
+  document.documentElement.dataset.input = next;
+  overlay.setInputMode(next === 'touch');
+  touchControls?.setActive(playing && next === 'touch');
+  resizeRenderer();
 }
 
-const share = document.getElementById('share') as HTMLButtonElement;
-share.addEventListener('click', async () => {
-  const url = `${location.origin}${location.pathname}#${encodeParams(params)}`;
-  try {
-    await navigator.clipboard.writeText(url);
-    share.textContent = 'コピーしました';
-  } catch {
-    share.textContent = url;
+/** 飛ぶ準備。最初は見渡していた視点の先の上空から、2 回目からは休憩した所から。 */
+function preparePlayer(): Player | null {
+  if (!ground) return null;
+  if (!player) {
+    const dir = new THREE.Vector3();
+    camera.getWorldDirection(dir);
+    const flat = Math.hypot(dir.x, dir.z) || 1;
+    const fx = dir.x / flat;
+    const fz = dir.z / flat;
+    const x = controls.target.x - fx * 350;
+    const z = controls.target.z - fz * 350;
+    // 正面 1.5km の一番高い所より上から始める。足元から一定の高さにすると、正面に高い山が
+    // あるとき、目の前が山肌で埋まった画面から始まった。
+    let ahead = Math.max(0, ground.heightAt(x, z));
+    for (let d = 50; d <= 1500; d += 50) ahead = Math.max(ahead, ground.heightAt(x + fx * d, z + fz * d));
+    const y = Math.max(Math.max(0, ground.heightAt(x, z)) + 160, ahead + 70);
+    player = new Player(ground, x, z);
+    player.restore({ x, y, z, yaw: Math.atan2(-fx, -fz), pitch: -0.22, flying: true });
+  } else {
+    // 休憩中につまみで島を作り直していたら、地面に埋まらないよう持ち上げる。
+    player.restore(player.snapshot());
   }
-  setTimeout(() => (share.textContent = 'この島の URL をコピー'), 2000);
-});
-
-// ── 飛ぶ ───────────────────────────────────────────────
-let mode: 'make' | 'fly' = 'make';
-
-// タッチ操作はプレイヤーを受け取って作るので、最初に飛ぶときに作る。
-let touchControls: TouchControls | null = null;
-
-function startFlying(): void {
-  if (!ground) return;
-  // 見渡していた視点の注視点の手前、少し高い所から飛び始める。
-  const dir = new THREE.Vector3();
-  camera.getWorldDirection(dir);
-  const flat = Math.hypot(dir.x, dir.z) || 1;
-  const fx = dir.x / flat;
-  const fz = dir.z / flat;
-  const x = controls.target.x - fx * 350;
-  const z = controls.target.z - fz * 350;
-  const y = Math.max(0, ground.heightAt(x, z)) + 160;
-  if (!player) player = new Player(ground, x, z);
-  player.restore({ x, y, z, yaw: Math.atan2(-fx, -fz), pitch: -0.18, flying: true });
-  if (touch && !touchControls) {
+  if (touchCapable && !touchControls) {
     touchControls = createTouchControls({
-      root: document.body,
+      root: document.getElementById('ui')!,
       surface: canvas,
       player,
       lookSensitivity: LOOK_SENSITIVITY,
-      isPlaying: () => mode === 'fly',
-      onPause: () => stopFlying(),
+      isPlaying: () => playing,
+      onPause: stopPlaying,
+      onTouchInput: () => setInputMode('touch'),
     });
   }
+  return player;
+}
 
+function handleStart(pointerType: string): void {
+  if (!preparePlayer()) return;
+  const startedWithTouch =
+    pointerType === 'touch' || pointerType === 'pen' || (pointerType === 'keyboard' && preferredTouch);
+  setInputMode(startedWithTouch ? 'touch' : 'keys');
+  if (inputMode === 'touch') {
+    void enterFullscreen();
+    startPlaying();
+    return;
+  }
+  // Esc を押した直後はブラウザがしばらくロックを受け付けない。
+  // 拒否されても例外にせず、押し直すよう促すだけにする。
+  void requestMouseLock();
+}
+
+function startPlaying(): void {
+  if (playing || !player) return;
+  playing = true;
+  if (!entered) {
+    entered = true;
+    overlay.setEntered();
+  }
   // 近くは stroll と同じチャンク（足元 2m 格子・木）で細かく描き、遠くは島全体の 1 枚に任せる。
   if (island && madeParams) {
     chunks = new ChunkManager(
       scene,
-      {
-        params: madeParams,
-        landscape: island.landscape,
-        water: island.water,
-      },
+      { params: madeParams, landscape: island.landscape, water: island.water },
       water.material,
     );
     overview.setCoverage(chunks.coverage);
     farForest.setCoverage(chunks.coverage);
   }
-
-  mode = 'fly';
   controls.enabled = false;
-  fog.density = FOG_FLY;
-  document.body.classList.add('flying');
-  touchControls?.setActive(true);
-  if (!touch) canvas.requestPointerLock();
+  overlay.hide();
+  overlay.showKeyboardGuide();
+  touchControls?.setActive(inputMode === 'touch');
+  if (player.autoFlight) void requestWakeLock();
 }
 
-function stopFlying(): void {
-  if (mode !== 'fly') return;
-  mode = 'make';
+function stopPlaying(): void {
+  if (!playing) return;
+  playing = false;
+  // 押しっぱなし・倒しっぱなしの判定が残らないように全部戻す。
+  player?.clearKeys();
+  // 隠さないと、カードの上にボタンが重なって表示されてしまう。
+  touchControls?.setActive(false);
+  void releaseWakeLock();
   chunks?.dispose();
   chunks = null;
   overview.setCoverage(null);
@@ -293,35 +332,139 @@ function stopFlying(): void {
   if (ground) controls.target.y = Math.max(0, ground.heightAt(controls.target.x, controls.target.z));
   controls.enabled = true;
   controls.update();
+  camera.fov = MAKE_FOV;
+  camera.updateProjectionMatrix();
   fog.density = FOG_MAKE;
-  document.body.classList.remove('flying');
-  touchControls?.setActive(false);
   if (document.pointerLockElement) document.exitPointerLock();
+  overlay.show(
+    inputMode === 'touch'
+      ? '休憩中。つまみで島を変えられます。タップすると続きから飛べます。'
+      : '休憩中。つまみで島を変えられます。クリックすると続きから飛べます。',
+  );
 }
 
-flyButton.addEventListener('click', startFlying);
-backButton.addEventListener('click', stopFlying);
+async function enterFullscreen(): Promise<void> {
+  if (document.fullscreenElement) return;
+  const root = document.documentElement as HTMLElement & {
+    requestFullscreen?: (options?: FullscreenOptions) => Promise<void>;
+  };
+  if (!root.requestFullscreen) return;
+  try {
+    await root.requestFullscreen({ navigationUI: 'hide' });
+  } catch {
+    // 内ブラウザはメソッドがあっても拒否する。通常表示のまま遊べればよい。
+    overlay.flash('全画面にできないため、この表示領域のまま遊びます。');
+  }
+}
+
+async function requestMouseLock(): Promise<void> {
+  try {
+    await canvas.requestPointerLock({ unadjustedMovement: true } as PointerLockOptions);
+  } catch {
+    try {
+      await canvas.requestPointerLock();
+    } catch {
+      // iPhone の全ブラウザで入力種別が誤報されても、入口を塞がない。
+      // Pointer Lock はタッチ操作に不要なので、タッチ可能ならそのまま開始できる。
+      if (touchCapable) {
+        setInputMode('touch');
+        startPlaying();
+        overlay.flash('タッチ操作で開始します。');
+        return;
+      }
+      overlay.flash('少し待ってから、もう一度クリックしてください');
+    }
+  }
+}
+
+async function requestWakeLock(): Promise<void> {
+  if (!playing || !player?.autoFlight || document.hidden || wakeLock) return;
+  try {
+    const nav = navigator as unknown as WakeLockNavigator;
+    wakeLock = (await nav.wakeLock?.request('screen')) ?? null;
+  } catch {
+    // 省電力設定や内ブラウザが拒否しても、オートフライト自体は続ける。
+  }
+}
+
+async function releaseWakeLock(): Promise<void> {
+  const lock = wakeLock;
+  wakeLock = null;
+  try {
+    await lock?.release();
+  } catch {
+    // 既にブラウザ側で解除済みなら何もしない。
+  }
+}
 
 document.addEventListener('pointerlockchange', () => {
-  // Esc でロックが外れたら「つくる」に戻る。
-  if (!document.pointerLockElement && mode === 'fly' && !touch) stopFlying();
+  if (document.pointerLockElement === canvas) {
+    setInputMode('keys');
+    startPlaying();
+  } else if (inputMode === 'keys' && playing) {
+    stopPlaying();
+  }
 });
-canvas.addEventListener('click', () => {
-  if (mode === 'fly' && !touch && !document.pointerLockElement) canvas.requestPointerLock();
+
+// 別のアプリに移ったら止める。スマホでは戻ってきたとき勝手に飛んでいると困る。
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && playing) stopPlaying();
+  else if (!document.hidden && playing && player?.autoFlight) void requestWakeLock();
 });
+addEventListener('blur', () => {
+  if (playing) player?.clearKeys();
+});
+
 addEventListener('keydown', (e: KeyboardEvent) => {
-  if (mode !== 'fly' || !player) return;
-  player.onKey(e.code, true, e.repeat);
+  if (!playing || !player) return;
   if (e.code === 'Space') e.preventDefault();
+  player.onKey(e.code, true, e.repeat);
 });
 addEventListener('keyup', (e: KeyboardEvent) => {
-  if (mode !== 'fly' || !player) return;
-  player.onKey(e.code, false);
+  if (playing) player?.onKey(e.code, false);
 });
 addEventListener('mousemove', (e: MouseEvent) => {
-  if (mode !== 'fly' || !player || document.pointerLockElement !== canvas) return;
+  if (document.pointerLockElement !== canvas || !player) return;
   player.onLook(e.movementX, e.movementY, LOOK_SENSITIVITY);
 });
+
+let resizeQueued = false;
+function scheduleResize(): void {
+  if (resizeQueued) return;
+  resizeQueued = true;
+  requestAnimationFrame(() => {
+    resizeQueued = false;
+    resizeRenderer();
+  });
+}
+addEventListener('resize', scheduleResize);
+window.visualViewport?.addEventListener('resize', scheduleResize);
+document.addEventListener('fullscreenchange', scheduleResize);
+addEventListener('orientationchange', scheduleResize);
+
+// ── 毎フレーム ─────────────────────────────────────────
+const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+/** 縦画面は視野を広げ、速く飛ぶほど少し広げる（stroll と同じ。動きを減らす設定なら速さでは広げない）。 */
+function updateCameraFeel(dt: number, p: Player): void {
+  const aspect = Math.max(0.35, camera.aspect);
+  const portrait = THREE.MathUtils.clamp((0.75 - aspect) / 0.3, 0, 1);
+  const baseFov = THREE.MathUtils.lerp(68, 82, portrait);
+  const speedFov =
+    p.flying && !reducedMotion ? THREE.MathUtils.clamp((p.speed - 28) / 84, 0, 1) * 6 : 0;
+  const next = THREE.MathUtils.lerp(camera.fov, baseFov + speedFov, 1 - Math.exp(-5 * dt));
+  if (Math.abs(next - camera.fov) > 0.01) {
+    camera.fov = next;
+    camera.updateProjectionMatrix();
+  }
+}
+
+/** 高く飛ぶほど霧を薄くし、空から遠くまで見えるようにする（高度 220m で半分。stroll と同じ）。 */
+function updateAerialVisibility(dt: number, clearance: number): void {
+  const clear = THREE.MathUtils.smoothstep(clearance, 35, 220);
+  const target = FOG_FLY * THREE.MathUtils.lerp(1, 0.5, clear);
+  fog.density = THREE.MathUtils.lerp(fog.density, target, 1 - Math.exp(-2.5 * dt));
+}
 
 /**
  * 描画の近い側の限界（near）を、見ている距離に合わせる。
@@ -334,31 +477,69 @@ addEventListener('mousemove', (e: MouseEvent) => {
 function fitNearPlane(): void {
   // 飛んでいる間も、地面から離れているほど near を上げる（高度 200m なら 4m）。
   // 足元近くを歩くときは 0.5m に戻る。
-  const near =
-    mode === 'fly'
-      ? Math.min(8, Math.max(0.5, (player?.altitudeAboveGround ?? 0) * 0.02))
-      : Math.min(30, Math.max(0.5, camera.position.distanceTo(controls.target) * 0.003));
+  const near = playing
+    ? Math.min(8, Math.max(0.5, (player?.altitudeAboveGround ?? 0) * 0.02))
+    : Math.min(30, Math.max(0.5, camera.position.distanceTo(controls.target) * 0.003));
   if (Math.abs(near - camera.near) > camera.near * 0.1) {
     camera.near = near;
     camera.updateProjectionMatrix();
   }
 }
 
-// ── 毎フレーム ─────────────────────────────────────────
-const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+/**
+ * 見渡すとき、島をカードの外の空いた所の真ん中に映す（カメラの中心をずらす）。
+ * PC はカードが左にあるので右へ、スマホはカードが下にあるので上へずらす。飛んでいる間は戻す。
+ * カードの出入りに合わせて少しずつ動かす。
+ */
+const viewShift = { x: 0, y: 0 };
+function frameIsland(dt: number): void {
+  const w = Math.max(1, innerWidth);
+  const h = Math.max(1, innerHeight);
+  const rect = playing ? null : overlay.panelRect();
+  let tx = 0;
+  let ty = 0;
+  if (rect) {
+    // 横に空きがあるならカードの右側の真ん中、無ければカードの上側の真ん中。
+    if (rect.right < w * 0.6) tx = rect.right / 2;
+    else ty = (rect.top - h) / 2;
+  }
+  const k = 1 - Math.exp(-8 * dt);
+  viewShift.x += (tx - viewShift.x) * k;
+  viewShift.y += (ty - viewShift.y) * k;
+  if (Math.abs(viewShift.x) < 0.5 && Math.abs(viewShift.y) < 0.5) {
+    if (camera.view) camera.clearViewOffset();
+    return;
+  }
+  camera.setViewOffset(w, h, -viewShift.x, -viewShift.y, w, h);
+}
+
 const timer = new THREE.Timer();
 let elapsed = 0;
 renderer.setAnimationLoop(() => {
   timer.update();
   const dt = Math.min(timer.getDelta(), 0.1);
   elapsed += dt;
-  if (mode === 'fly' && player) {
+  if (playing && player) {
     player.update(dt, camera, reducedMotion);
     touchControls?.update();
     chunks?.update(player.position.x, player.position.z);
+    updateCameraFeel(dt, player);
+    updateAerialVisibility(dt, player.altitudeAboveGround);
+    overlay.setFlightInfo(player.flying, player.speed, player.altitudeAboveSeaLevel, player.autoFlight);
+    if (player.autoFlight !== lastAutoFlight) {
+      lastAutoFlight = player.autoFlight;
+      if (player.autoFlight) {
+        overlay.flash('AUTO：視点は自由。左右を大きく入れると進路を変えます。');
+        void requestWakeLock();
+      } else {
+        void releaseWakeLock();
+      }
+    }
   } else {
     controls.update();
+    overlay.setFlightInfo(false, 0, 0, false);
   }
+  frameIsland(dt);
   fitNearPlane();
   sky.update(camera, elapsed);
   updateIslandLight(dt);
@@ -379,7 +560,12 @@ if (import.meta.env.DEV) {
     sky,
     player: () => player,
     island: () => island,
+    // 自動ブラウザは Pointer Lock を持たないので、入口を省いて飛び始める。
+    fly: () => {
+      if (preparePlayer()) startPlaying();
+    },
   };
 }
-flyButton.disabled = true;
+// 開いたら、まず粗い下見（約 0.3 秒）で島を見せ、続けて本番の細かさで作り直す。
+request(PREVIEW_RES);
 commit();

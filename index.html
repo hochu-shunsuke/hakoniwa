@@ -3,20 +3,16 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <title>箱庭</title>
+    <meta name="theme-color" content="#86a3b8" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="island maker" />
+    <title>island maker</title>
   </head>
   <body>
     <canvas id="view"></canvas>
-    <aside id="panel">
-      <h1>箱庭</h1>
-      <p class="lead">つまみで島をつくり、鳥になって飛ぶ</p>
-      <canvas id="minimap"></canvas>
-      <button id="fly" class="primary">飛ぶ</button>
-      <button id="share">この島の URL をコピー</button>
-      <p class="hint">飛ぶ: マウスで見る・WASD・Space 上昇・C 下降・Shift 加速・Esc で戻る</p>
-    </aside>
-    <button id="back">つくるに戻る</button>
-    <div id="status"></div>
+    <div id="ui"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

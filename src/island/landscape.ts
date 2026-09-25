@@ -177,23 +177,27 @@ function erode(
   // 格子の細かさが変わっても谷の深さが揃うよう、面積は m² で数え、K は 1m あたりにする。
   const cellArea = cell * cell;
 
+  const nOff = Int32Array.from(NEIGHBORS8, ([di, dj]) => dj * n + di);
+  const nDist = Float64Array.from(NEIGHBORS8, ([, , dd]) => dd);
   for (let it = 0; it < ITERATIONS; it++) {
     // 1. 流れていく先（一番下る隣）。同じ下り具合なら先に見た方（NEIGHBORS8 の順）。
+    // **隣は番号の差（nOff）で引く。** `for (const [di, dj, dd] of NEIGHBORS8)` と書くと、
+    // 66,000 マス × 8 × 140 回の分解だけで侵食全体の 8 割（1.3 秒）を使っていた。
+    // 計算の順番も値も同じなので、島の形は変わらない。
     for (let k = 0; k < N; k++) {
       rec[k] = k;
       dist[k] = 1;
       donorCount[k] = 0;
       if (base[k]) continue;
-      const i = k % n;
-      const j = (k / n) | 0;
+      const hk = h[k];
       let best = 0;
-      for (const [di, dj, dd] of NEIGHBORS8) {
-        const m = (j + dj) * n + (i + di);
-        const s = (h[k] - h[m]) / dd;
+      for (let q = 0; q < 8; q++) {
+        const m = k + nOff[q];
+        const s = (hk - h[m]) / nDist[q];
         if (s > best) {
           best = s;
           rec[k] = m;
-          dist[k] = dd * cell;
+          dist[k] = nDist[q] * cell;
         }
       }
     }

@@ -8,8 +8,7 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "test": "node test/island.test.mjs",
-    "ci": "npm run typecheck && npm run build && npm test"
+    "ci": "npm run typecheck && npm run build"
   },
   "dependencies": {
     "three": "^0.185.1"

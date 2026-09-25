@@ -13,16 +13,19 @@ const toByte = (v: number) => {
   return Math.max(0, Math.min(255, Math.round(c * 255)));
 };
 
-export function drawIsland(canvas: HTMLCanvasElement, island: Island, terrain: Terrain): void {
+/** 地図の画素（RGBA）。Worker で作って画面へ渡す。 */
+export interface IslandMap {
+  size: number;
+  pixels: Uint8ClampedArray;
+}
+
+/** 地図の画素を作る。画面の部品に触らないので Worker で動く（島 1 つで 15 万点の色付け）。 */
+export function renderIslandMap(island: Island, terrain: Terrain): IslandMap {
   // 地図は小さいので 2 点に 1 点で足りる。
   const step = island.n > 300 ? 2 : 1;
   const { n, cell, height, waterKind, temperature, moisture } = island;
   const size = Math.floor((n - 1) / step) + 1;
-  canvas.width = size;
-  canvas.height = size;
-  const ctx = canvas.getContext('2d')!;
-  const img = ctx.createImageData(size, size);
-  const px = img.data;
+  const px = new Uint8ClampedArray(size * size * 4);
   const color = new Float32Array(3);
   const at = (i: number, j: number) =>
     height[Math.max(0, Math.min(n - 1, j)) * n + Math.max(0, Math.min(n - 1, i))];
@@ -65,5 +68,15 @@ export function drawIsland(canvas: HTMLCanvasElement, island: Island, terrain: T
       px[o + 3] = 255;
     }
   }
+  return { size, pixels: px };
+}
+
+/** 地図を canvas に描く。 */
+export function drawIslandMap(canvas: HTMLCanvasElement, map: IslandMap): void {
+  canvas.width = map.size;
+  canvas.height = map.size;
+  const ctx = canvas.getContext('2d')!;
+  const img = ctx.createImageData(map.size, map.size);
+  img.data.set(map.pixels);
   ctx.putImageData(img, 0, 0);
 }
