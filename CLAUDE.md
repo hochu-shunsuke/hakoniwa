@@ -122,4 +122,5 @@ src/render/   見渡す島と遠景（overviewMesh.ts）、遠目の木（farFor
 ```bash
 npm run dev   # http://localhost:5173（LAN 公開）
 npm run ci    # 型・ビルド（テストはまだ無い）
+npm run deploy  # ビルドして Cloudflare へ（https://island-maker.hochu.workers.dev）。静的ファイルだけ
 ```

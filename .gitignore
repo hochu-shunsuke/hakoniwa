@@ -7,3 +7,4 @@ shots/
 
 .DS_Store
 *.log
+.wrangler/
