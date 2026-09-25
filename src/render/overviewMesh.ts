@@ -163,7 +163,8 @@ export class OverviewMesh {
 
     // 格子の外にも海底が無いと、島のまわりに格子の四角い境目が透けて見える。
     const seabed = new THREE.Mesh(
-      new THREE.PlaneGeometry(80000, 80000).rotateX(-Math.PI / 2),
+      // 巨大な三角形 2 枚にすると深度の補間誤差が大きいので、400m 四方に分ける（water.ts と同じ理由）。
+      new THREE.PlaneGeometry(80000, 80000, 200, 200).rotateX(-Math.PI / 2),
       new THREE.MeshLambertMaterial({ color: SEABED_DEEP }),
     );
     seabed.position.y = OUTER_SEABED;

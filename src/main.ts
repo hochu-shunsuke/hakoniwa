@@ -354,5 +354,10 @@ renderer.setAnimationLoop(() => {
 });
 
 addEventListener('hashchange', () => location.reload());
+
+// 開発用: 自動ブラウザから視点と時間を動かして、画面の揺れを測るための窓口。本番ビルドには入らない。
+if (import.meta.env.DEV) {
+  (window as unknown as Record<string, unknown>).__hako = { camera, controls, water, renderer, scene, sky };
+}
 flyButton.disabled = true;
 commit();

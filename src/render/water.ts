@@ -18,6 +18,10 @@ const vert = /* glsl */ `
   }
 `;
 
+/** 海の板の大きさと、三角形 1 枚の大きさ（m）。 */
+const SEA_SIZE = 80000;
+const SEA_CELL = 400;
+
 const frag = /* glsl */ `
   uniform float uTime;
   uniform vec3 uShallow;
@@ -193,7 +197,10 @@ export class Water {
     this.material = waterMaterial(sunDirection, skyHorizon, sunHex);
 
     // 島を遠くから見渡しても海が切れないよう、霧で消える距離より十分大きく取る。
-    const geo = new THREE.PlaneGeometry(80000, 80000, 1, 1);
+    // **1 枚の巨大な三角形にしないこと。** 80km の三角形 2 枚では画素ごとの深度の補間誤差が
+    // 大きく、浅瀬で水面と海底の勝ち負けが揺れた。SEA_CELL 四方の三角形に分ける。
+    const segments = Math.round(SEA_SIZE / SEA_CELL);
+    const geo = new THREE.PlaneGeometry(SEA_SIZE, SEA_SIZE, segments, segments);
     geo.rotateX(-Math.PI / 2);
     this.mesh = new THREE.Mesh(geo, this.material);
     this.mesh.position.y = SEA_LEVEL;
@@ -217,8 +224,10 @@ export class Water {
   update(camera: THREE.Camera, elapsed: number): void {
     updateWaterTime(elapsed);
     // 波は世界座標で計算しているので、面をずらしても模様は動かない。
-    this.mesh.position.x = camera.position.x;
-    this.mesh.position.z = camera.position.z;
+    // 三角形の大きさの刻みでだけ動かす。少しずつ動かすと、三角形の中の深度の誤差の出方が
+    // 毎フレーム変わり、動いている間だけ水際がガタついた（止まると直った）。
+    this.mesh.position.x = Math.round(camera.position.x / SEA_CELL) * SEA_CELL;
+    this.mesh.position.z = Math.round(camera.position.z / SEA_CELL) * SEA_CELL;
   }
 
 }
