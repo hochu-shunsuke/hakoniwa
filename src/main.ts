@@ -320,9 +320,11 @@ addEventListener('mousemove', (e: MouseEvent) => {
  * （4km なら 12m、精度は 24 倍）。
  */
 function fitNearPlane(): void {
+  // 飛んでいる間も、地面から離れているほど near を上げる（高度 200m なら 4m）。
+  // 足元近くを歩くときは 0.5m に戻る。
   const near =
     mode === 'fly'
-      ? 0.5
+      ? Math.min(8, Math.max(0.5, (player?.altitudeAboveGround ?? 0) * 0.02))
       : Math.min(30, Math.max(0.5, camera.position.distanceTo(controls.target) * 0.003));
   if (Math.abs(near - camera.near) > camera.near * 0.1) {
     camera.near = near;

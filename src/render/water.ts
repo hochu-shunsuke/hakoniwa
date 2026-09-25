@@ -99,18 +99,22 @@ const frag = /* glsl */ `
     float spec = pow(max(dot(n, h), 0.0), 220.0);
     col += uSunColor * spec * 1.6;
 
-    // 波打ち際の泡: 水際のすぐ内側の帯と、岸へ寄せてくる白波の筋。
+    // 波打ち際の泡: 水際から少し沖（水深 0.1〜1.3m）の帯と、岸へ寄せてくる白波の筋。
+    // 水深 0 のちょうど上に置くと、地面との描き合いで泡ごとちらつく。
     float grain = vnoise(p * 0.18 + vec2(uTime * 0.25, -uTime * 0.18));
-    float shore = 1.0 - smoothstep(0.0, 0.9 + grain * 0.6, depth);
+    float band = smoothstep(0.08, 0.3, depth) * (1.0 - smoothstep(0.7 + grain * 0.6, 1.4 + grain * 0.6, depth));
     float surf = sin(depth * 2.6 - uTime * 1.3 + grain * 3.0);
-    float lines = smoothstep(0.78, 0.97, surf) * (1.0 - smoothstep(0.6, 3.2, depth)) * step(0.05, depth);
-    float foam = clamp(max(shore * (0.55 + 0.45 * grain), lines * 0.55), 0.0, 1.0);
+    float lines = smoothstep(0.78, 0.97, surf) * smoothstep(0.3, 0.8, depth) * (1.0 - smoothstep(0.8, 3.2, depth));
+    float foam = clamp(max(band * (0.55 + 0.45 * grain), lines * 0.55), 0.0, 1.0);
     col = mix(col, vec3(0.95, 0.97, 0.98), foam * 0.85);
 
     // 浅いほど透けて底が見える。深い所と、斜めから見た所は映り込みで不透明に近づく。
     float alpha = mix(0.45, 0.94, smoothstep(0.3, 10.0, depth));
     alpha = max(alpha, fres * 0.95);
     alpha = max(alpha, foam * 0.9);
+    // 水深 0 に近づくほど透明にする。水面と地面の深度がほぼ同じ帯は、どちらが手前か
+    // 描くたびに入れ替わる。そこで水を消しておけば、ちらつきが見えない。
+    alpha *= smoothstep(0.0, 0.12, depth);
     gl_FragColor = vec4(col, alpha);
 
     // three の標準マテリアルと同じ順序。霧の色は出力色空間で渡ってくるため最後。
@@ -165,15 +169,11 @@ export function waterMaterial(
       depthWrite: false,
       side: THREE.DoubleSide,
       fog: true,
-      // 水際では水面と地形の深度がほぼ同じになり、画素ごとに勝敗が揺れて
-      // ちらつく（Z ファイティング）。実測で海の水際の 3% が隙間 5cm 未満。
-      //
-      // **水を奥へ寄せる（正の値）こと。** 水は岸の内側まで張ってあり、
-      // 地形に隠されて初めて水際の線ができる。手前へ寄せると水が土手を
-      // 突き抜けて、水際が広がってしまう。
-      polygonOffset: true,
-      polygonOffsetFactor: 1,
-      polygonOffsetUnits: 2,
+      // **深度をずらす補正（polygonOffset）は使わない。** stroll では水際のちらつきを
+      // 抑えるため水を奥へずらしていたが、ずらし量は斜めから見るほど大きくなる。
+      // 広い海の板を見渡すと数 m ぶん奥へずれ、水深 1〜5m の浅瀬の海底が水面を
+      // 突き抜けてちらついた（利用者の指摘）。代わりにシェーダーが自分の下の水深を知り、
+      // 水深 0 に近づくほど透明にして、水と地面が描き合う帯そのものを見えなくする。
     });
   }
   return shared;
