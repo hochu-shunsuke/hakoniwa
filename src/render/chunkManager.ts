@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { vegetation } from './vegetation';
 import { CHUNK_SIZE, LOD_RINGS } from '../world/chunk';
 import { RENDER_ORDER } from './order';
+import { createTerrainMaterial } from './terrainMaterial';
 import { ISLAND_SIZE } from '../island/grid';
 import type { BuiltChunk, InitRequest, WorkerRequest } from '../world/worker';
 
@@ -69,7 +70,7 @@ export class ChunkManager {
     waterMaterial: THREE.Material,
   ) {
     this.scene = scene;
-    this.material = new THREE.MeshLambertMaterial({ vertexColors: true });
+    this.material = createTerrainMaterial();
     this.waterMaterial = waterMaterial;
 
     const count = Math.max(2, Math.min(4, (navigator.hardwareConcurrency || 4) - 1));
@@ -206,6 +207,9 @@ export class ChunkManager {
     geo.setAttribute('position', new THREE.BufferAttribute(data.position, 3));
     geo.setAttribute('normal', new THREE.BufferAttribute(data.normal, 3));
     geo.setAttribute('color', new THREE.BufferAttribute(data.color, 3));
+    geo.setAttribute('rock', new THREE.BufferAttribute(data.rock, 3));
+    geo.setAttribute('surf', new THREE.BufferAttribute(data.surf, 3));
+    geo.setIndex(new THREE.BufferAttribute(data.index, 1));
     geo.computeBoundingSphere();
 
     const mesh = new THREE.Mesh(geo, this.material);

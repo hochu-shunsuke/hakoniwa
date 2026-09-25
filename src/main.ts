@@ -122,7 +122,10 @@ function show(next: Island, made: IslandParams): void {
   madeParams = made;
   terrain = new Terrain(made, next.landscape, new IslandWater(next.water));
   overview.set(next, terrain);
-  water.setHeightMap(next.landscape.height, next.landscape.n);
+  // 水深は川に合わせて彫った後の高さで測る。彫る前の高さだと川の中が浅瀬扱いになり、
+  // 川幅いっぱいに岸の泡が立って雪の土手のように見えた。
+  const carved = next.landscape.height.map((h, k) => h + next.water.carve[k]);
+  water.setHeightMap(carved, next.landscape.n);
   drawIsland(minimap, next, terrain);
   if (ground) ground.terrain = terrain;
   else ground = new IslandGround(terrain);
@@ -357,7 +360,15 @@ addEventListener('hashchange', () => location.reload());
 
 // 開発用: 自動ブラウザから視点と時間を動かして、画面の揺れを測るための窓口。本番ビルドには入らない。
 if (import.meta.env.DEV) {
-  (window as unknown as Record<string, unknown>).__hako = { camera, controls, water, renderer, scene, sky };
+  (window as unknown as Record<string, unknown>).__hako = {
+    camera,
+    controls,
+    water,
+    renderer,
+    scene,
+    sky,
+    player: () => player,
+  };
 }
 flyButton.disabled = true;
 commit();

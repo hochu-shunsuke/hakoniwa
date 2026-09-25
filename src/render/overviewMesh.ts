@@ -2,9 +2,11 @@ import * as THREE from 'three';
 import type { Island } from '../island/generate';
 import { gridToWorld } from '../island/ground';
 import { CHUNK_SIZE } from '../world/chunk';
-import type { Terrain } from '../world/terrain';
+import { SURFACE_STRIDE } from '../world/islandSurface';
+import { type Terrain, splitsAlongMainDiagonal } from '../world/terrain';
 import { COVERAGE_OFFSET, COVERAGE_SIZE } from './chunkManager';
 import { RENDER_ORDER } from './order';
+import { createTerrainMaterial } from './terrainMaterial';
 
 /**
  * 島全体を 1 枚で描く（12m 格子）。「つくる」で見渡す島であり、飛んでいる間の遠景でもある。
@@ -37,8 +39,13 @@ const COVERAGE_GLSL = /* glsl */ `
 export function buildOverviewTerrain(island: Island, terrain: Terrain): THREE.BufferGeometry {
   const { n, cell, height, temperature, moisture } = island;
   const position = new Float32Array(n * n * 3);
+  const normal = new Float32Array(n * n * 3);
   const color = new Float32Array(n * n * 3);
-  const c = new Float32Array(3);
+  const rock = new Float32Array(n * n * 3);
+  const surf = new Float32Array(n * n * 3);
+  const layers = new Float32Array(SURFACE_STRIDE);
+  const at = (i: number, j: number) =>
+    height[Math.max(0, Math.min(n - 1, j)) * n + Math.max(0, Math.min(n - 1, i))];
   for (let j = 0; j < n; j++) {
     const z = gridToWorld(j, n);
     for (let i = 0; i < n; i++) {
@@ -48,15 +55,20 @@ export function buildOverviewTerrain(island: Island, terrain: Terrain): THREE.Bu
       position[k * 3] = x;
       position[k * 3 + 1] = h;
       position[k * 3 + 2] = z;
-      // 傾きは chunk.ts と同じ「四角形の高低差 ÷ 対角」で測る。
-      const i1 = Math.min(n - 1, i + 1);
-      const j1 = Math.min(n - 1, j + 1);
-      const hs = [h, height[j * n + i1], height[j1 * n + i], height[j1 * n + i1]];
-      const slope = Math.min(1, (Math.max(...hs) - Math.min(...hs)) / (cell * 1.4142));
-      terrain.shade(x, z, h, slope, temperature[k], moisture[k], terrain.specialAt(x, z), terrain.patchAt(x, z), c, 0);
-      color[k * 3] = c[0];
-      color[k * 3 + 1] = c[1];
-      color[k * 3 + 2] = c[2];
+      // 法線と傾きは chunk.ts と同じ中心差分で取る。
+      const dx = (at(i + 1, j) - at(i - 1, j)) / (2 * cell);
+      const dz = (at(i, j + 1) - at(i, j - 1)) / (2 * cell);
+      const len = Math.sqrt(dx * dx + 1 + dz * dz);
+      normal[k * 3] = -dx / len;
+      normal[k * 3 + 1] = 1 / len;
+      normal[k * 3 + 2] = -dz / len;
+      const slope = Math.min(1, Math.sqrt(dx * dx + dz * dz));
+      terrain.surface(x, z, h, slope, temperature[k], moisture[k], terrain.specialAt(x, z), terrain.patchAt(x, z), layers, 0);
+      for (let c = 0; c < 3; c++) {
+        color[k * 3 + c] = layers[c];
+        rock[k * 3 + c] = layers[3 + c];
+        surf[k * 3 + c] = layers[6 + c];
+      }
     }
   }
 
@@ -68,19 +80,31 @@ export function buildOverviewTerrain(island: Island, terrain: Terrain): THREE.Bu
       const b = a + 1;
       const d = a + n;
       const e = d + 1;
-      index[o++] = a;
-      index[o++] = d;
-      index[o++] = e;
-      index[o++] = a;
-      index[o++] = e;
-      index[o++] = b;
+      // チャンクと同じ割り方（高低差の小さい対角線）。
+      if (splitsAlongMainDiagonal(height[a], height[b], height[d], height[e])) {
+        index[o++] = a;
+        index[o++] = d;
+        index[o++] = e;
+        index[o++] = a;
+        index[o++] = e;
+        index[o++] = b;
+      } else {
+        index[o++] = a;
+        index[o++] = d;
+        index[o++] = b;
+        index[o++] = d;
+        index[o++] = e;
+        index[o++] = b;
+      }
     }
   }
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(position, 3));
+  geo.setAttribute('normal', new THREE.BufferAttribute(normal, 3));
   geo.setAttribute('color', new THREE.BufferAttribute(color, 3));
+  geo.setAttribute('rock', new THREE.BufferAttribute(rock, 3));
+  geo.setAttribute('surf', new THREE.BufferAttribute(surf, 3));
   geo.setIndex(new THREE.BufferAttribute(index, 1));
-  geo.computeVertexNormals();
   geo.computeBoundingSphere();
   return geo;
 }
@@ -140,19 +164,12 @@ export class OverviewMesh {
   private readonly waterMaterial: THREE.ShaderMaterial;
 
   constructor(sharedWater: THREE.ShaderMaterial) {
-    this.terrainMaterial = new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true });
-    this.terrainMaterial.onBeforeCompile = (shader) => {
-      Object.assign(shader.uniforms, this.uniforms);
-      shader.vertexShader = shader.vertexShader
-        .replace('#include <common>', '#include <common>\nvarying vec2 vOverviewXZ;')
-        .replace(
-          '#include <begin_vertex>',
-          '#include <begin_vertex>\nvOverviewXZ = (modelMatrix * vec4(transformed, 1.0)).xz;',
-        );
-      shader.fragmentShader = shader.fragmentShader
-        .replace('#include <common>', `#include <common>\nvarying vec2 vOverviewXZ;\n${COVERAGE_GLSL}`)
-        .replace('void main() {', 'void main() {\n  if (coveredByChunk(vOverviewXZ)) discard;');
-    };
+    this.terrainMaterial = createTerrainMaterial({
+      uniforms: this.uniforms as unknown as Record<string, THREE.IUniform>,
+      fragmentPars: COVERAGE_GLSL,
+      fragmentStart: '  if (coveredByChunk(vTerrainPos.xz)) discard;',
+      cacheKey: 'overview',
+    });
 
     // 水の材質は海・近くの川と共有しているので、遠景の水面だけ複製して「描かない所」を足す。
     this.waterMaterial = sharedWater.clone();

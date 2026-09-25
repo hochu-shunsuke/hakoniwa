@@ -1,6 +1,5 @@
-import { hash2 } from '../core/rng';
 import { CLIMATE_STEP } from './climate';
-import type { SpecialHit } from './special';
+import { SURFACE_STRIDE } from './islandSurface';
 import { splitsAlongMainDiagonal, type Terrain } from './terrain';
 
 /** 1 チャンクの一辺（ワールド単位 ≒ メートル）。 */
@@ -25,26 +24,15 @@ if (CHUNK_SIZE % CLIMATE_STEP !== 0) {
   throw new Error('CLIMATE_STEP は CHUNK_SIZE を割り切ってください');
 }
 
-// 曲率による明暗（擬似 AO）。凹みを暗く、盛り上がりを明るくして、
-// 影を落とさずに地形の形を読ませる。
-//
-// **上限で頭打ちにしないこと。** 曲率は 2 階差分なので分布の裾が極端に長い。
-// 実測（step=2）で中央 0.008 に対し 99% は 0.30 と 38 倍ある。clamp で切ると
-// 1 割以上の面が一律 -34% に張り付き、縁の硬い黒い斑が斜面に散る。
-// x/(1+x) で柔らかく飽和させると、裾は伸びるが張り付かない。
-//
-// GAIN は地形の性質が変わるたびに合わせ直すこと。地形をスプラインで作り直した
-// とき、旧地形に合わせた 12 のままにして斜面が斑になった（一度これで壊した）。
-const CURVATURE_GAIN = 6;
-/** 凹み側。本物の AO も凹みの方が強く効くので、明るくする側より大きく取る。 */
-const CURVATURE_DARK = 0.34;
-/** 盛り上がり側。 */
-const CURVATURE_LIGHT = 0.2;
-
 export interface ChunkArrays {
+  /** 頂点を共有する格子（(n+1)² 点）と、外周のスカートの下端（4(n+1) 点）。 */
   position: Float32Array;
   normal: Float32Array;
+  /** 地面の層（world/islandSurface.ts）。color = 土台、rock = 岩の色、surf = 岩の量・雪の量・凹みの明暗。 */
   color: Float32Array;
+  rock: Float32Array;
+  surf: Float32Array;
+  index: Uint16Array | Uint32Array;
   /**
    * 内陸の水面の三角形（座標だけ）。無ければ長さ 0。
    *
@@ -57,8 +45,12 @@ export interface ChunkArrays {
 }
 
 /**
- * チャンクの地形メッシュを、面ごとの法線と色を持つ生の配列として作る。
- * フラットシェーディングのローポリ質感を出すため、頂点は共有しない。
+ * チャンクの地形メッシュ。頂点を共有し、法線は格子の中心差分で取る（なめらかな陰影）。
+ * 色は頂点ごとの層で持ち、境目の切り方と細かい質感は画素ごとに作る（render/terrainMaterial.ts）。
+ *
+ * 以前は面ごとに 1 色・面の法線のローポリだった。色の切り替え（雪・岩）が格子の四角に
+ * 揃って市松模様になり、遠くの粗いチャンクほど大きな四角が並んだ（利用者の指摘）。
+ *
  * 座標はチャンク原点からの相対値（遠方での精度を保つため）。
  */
 export function buildChunkArrays(
@@ -72,8 +64,8 @@ export function buildChunkArrays(
   const oz = cz * CHUNK_SIZE;
 
   // 高さは格子点ごとに一度だけ計算する（ノイズ評価がこの処理の大半を占めるため）。
-  // 外周に 1 リング余分に取っているのは曲率が隣の四角形を要るため。これが無いと
-  // チャンクの継ぎ目にだけ明暗の線が出る。格子点は (n+1)^2 → (n+3)^2（step=2 で +4%）。
+  // 外周に 1 リング余分に取っているのは、法線の中心差分が隣の点を要るため。これが無いと
+  // チャンクの継ぎ目にだけ陰影の線が出る。
   const W = n + 3;
   const hs = new Float32Array(W * W);
   for (let j = -1; j <= n + 1; j++) {
@@ -83,10 +75,6 @@ export function buildChunkArrays(
   }
   // i, j は -1 から n+1 まで引ける。
   const H = (i: number, j: number) => hs[(j + 1) * W + (i + 1)];
-
-  /** 四角形 1 枚の平均の高さ。曲率をこの単位で測る。 */
-  const Q = (i: number, j: number) =>
-    (H(i, j) + H(i + 1, j) + H(i, j + 1) + H(i + 1, j + 1)) * 0.25;
 
   // 湿り気は粗い格子で引いて補間する（CLIMATE_STEP 参照）。
   const cg = CHUNK_SIZE / CLIMATE_STEP;
@@ -112,109 +100,127 @@ export function buildChunkArrays(
     return (a + (b - a) * fu) * (1 - fv) + (c + (d - c) * fu) * fv;
   };
 
-  const triCount = n * n * 2 + n * 8;
-  const position = new Float32Array(triCount * 9);
-  const normal = new Float32Array(triCount * 9);
-  const color = new Float32Array(triCount * 9);
-  const faceColor = new Float32Array(3);
-  let p = 0;
+  const w = n + 1;
+  const grid = w * w;
+  const vertexCount = grid + 4 * w;
+  const position = new Float32Array(vertexCount * 3);
+  const normal = new Float32Array(vertexCount * 3);
+  const color = new Float32Array(vertexCount * 3);
+  const rock = new Float32Array(vertexCount * 3);
+  const surf = new Float32Array(vertexCount * 3);
+  const layers = new Float32Array(SURFACE_STRIDE);
 
-  /** 三角形 1 枚を、面法線と単一の面色で書き込む。 */
-  const tri = (
-    ax: number, ay: number, az: number,
-    bx: number, by: number, bz: number,
-    cx2: number, cy2: number, cz2: number,
-    r: number, g: number, b: number,
-  ) => {
-    const e1x = bx - ax, e1y = by - ay, e1z = bz - az;
-    const e2x = cx2 - ax, e2y = cy2 - ay, e2z = cz2 - az;
-    let nx = e1y * e2z - e1z * e2y;
-    let ny = e1z * e2x - e1x * e2z;
-    let nz = e1x * e2y - e1y * e2x;
-    const len = Math.hypot(nx, ny, nz) || 1;
-    nx /= len; ny /= len; nz /= len;
-
-    position[p] = ax; position[p + 1] = ay; position[p + 2] = az;
-    position[p + 3] = bx; position[p + 4] = by; position[p + 5] = bz;
-    position[p + 6] = cx2; position[p + 7] = cy2; position[p + 8] = cz2;
-    for (let k = 0; k < 9; k += 3) {
-      normal[p + k] = nx; normal[p + k + 1] = ny; normal[p + k + 2] = nz;
-      color[p + k] = r; color[p + k + 1] = g; color[p + k + 2] = b;
+  const writeVertex = (v: number, x: number, y: number, z: number, from: number) => {
+    position[v * 3] = x;
+    position[v * 3 + 1] = y;
+    position[v * 3 + 2] = z;
+    for (let c = 0; c < 3; c++) {
+      normal[v * 3 + c] = normal[from * 3 + c];
+      color[v * 3 + c] = color[from * 3 + c];
+      rock[v * 3 + c] = rock[from * 3 + c];
+      surf[v * 3 + c] = surf[from * 3 + c];
     }
-    p += 9;
   };
 
-  for (let j = 0; j < n; j++) {
-    for (let i = 0; i < n; i++) {
-      const x0 = i * step, z0 = j * step;
-      const x1 = x0 + step, z1 = z0 + step;
-      const h00 = H(i, j), h10 = H(i + 1, j), h01 = H(i, j + 1), h11 = H(i + 1, j + 1);
-      // 気候は四角形の中心で 1 度だけ引く。面ごとに引くほどの精度は要らない。
-      const cx = ox + x0 + step * 0.5;
-      const cz = oz + z0 + step * 0.5;
-      const moisture = moistureLocal(x0 + step * 0.5, z0 + step * 0.5);
-      const temp = terrain.temperatureAt(cx, cz, (h00 + h11) * 0.5);
-      const special = terrain.specialAt(cx, cz);
-      const patch = terrain.patchAt(cx, cz);
+  for (let j = 0; j <= n; j++) {
+    for (let i = 0; i <= n; i++) {
+      const v = j * w + i;
+      const h = H(i, j);
+      const x = ox + i * step;
+      const z = oz + j * step;
+      const dx = (H(i + 1, j) - H(i - 1, j)) / (2 * step);
+      const dz = (H(i, j + 1) - H(i, j - 1)) / (2 * step);
+      const len = Math.sqrt(dx * dx + 1 + dz * dz);
+      position[v * 3] = i * step;
+      position[v * 3 + 1] = h;
+      position[v * 3 + 2] = j * step;
+      normal[v * 3] = -dx / len;
+      normal[v * 3 + 1] = 1 / len;
+      normal[v * 3 + 2] = -dz / len;
 
-      // 曲率: 周りの四角形より低ければ凹み（負）、高ければ盛り上がり（正）。
-      // step で割ると LOD が変わっても同じ強さの明暗になる。
-      // 気候と同じく四角形あたり 1 度でよい（形の単位は四角形なので）。
-      const curv =
-        (Q(i, j) - (Q(i - 1, j) + Q(i + 1, j) + Q(i, j - 1) + Q(i, j + 1)) * 0.25) / step;
-
-      // 傾きは四角形あたり 1 度だけ。気候と同じ扱い。
-      // 三角形ごとに測ると、同じ四角形の 2 枚で値が食い違う（実測で step=48 の
-      // 90% が 0.15 ちがう）。岩色の切り替えは 0.42〜0.72 の幅 0.3 しかないので、
-      // 隣り合う三角形で岩と草が交互になり、斜面に細かい斜めの縞が出ていた。
-      const lo = Math.min(h00, h10, h01, h11);
-      const hi = Math.max(h00, h10, h01, h11);
-      const slope = Math.min(1, (hi - lo) / (step * 1.4142));
-
-      // 割り方の判定は terrain.ts に 1 つだけ置いてある。heightOnGrid も同じものを
-      // 使うので、足元と見た目が必ず一致する。ここでベタ書きに戻さないこと。
-      if (splitsAlongMainDiagonal(h00, h10, h01, h11)) {
-        shadeTri(terrain, h00, h01, h11, cx, cz, slope, temp, moisture, special, patch, curv, i, j, 0, faceColor);
-        tri(x0, h00, z0, x0, h01, z1, x1, h11, z1, faceColor[0], faceColor[1], faceColor[2]);
-
-        shadeTri(terrain, h00, h11, h10, cx, cz, slope, temp, moisture, special, patch, curv, i, j, 1, faceColor);
-        tri(x0, h00, z0, x1, h11, z1, x1, h10, z0, faceColor[0], faceColor[1], faceColor[2]);
-      } else {
-        shadeTri(terrain, h00, h01, h10, cx, cz, slope, temp, moisture, special, patch, curv, i, j, 0, faceColor);
-        tri(x0, h00, z0, x0, h01, z1, x1, h10, z0, faceColor[0], faceColor[1], faceColor[2]);
-
-        shadeTri(terrain, h01, h11, h10, cx, cz, slope, temp, moisture, special, patch, curv, i, j, 1, faceColor);
-        tri(x0, h01, z1, x1, h11, z1, x1, h10, z0, faceColor[0], faceColor[1], faceColor[2]);
+      const slope = Math.min(1, Math.sqrt(dx * dx + dz * dz));
+      terrain.surface(
+        x,
+        z,
+        h,
+        slope,
+        terrain.temperatureAt(x, z, h),
+        moistureLocal(i * step, j * step),
+        terrain.specialAt(x, z),
+        terrain.patchAt(x, z),
+        layers,
+        0,
+      );
+      for (let c = 0; c < 3; c++) {
+        color[v * 3 + c] = layers[c];
+        rock[v * 3 + c] = layers[3 + c];
+        surf[v * 3 + c] = layers[6 + c];
       }
     }
   }
 
   // スカート: 外周を真下に下ろし、LOD 差でできる隙間から空が覗くのを防ぐ。
-  const sr = 0.05, sg = 0.045, sb = 0.042;
+  // 下端の点は上端の点と同じ色・法線にする（隙間から見えても地面の続きに見える）。
   const S = CHUNK_SIZE;
   const D = SKIRT_DEPTH;
-  for (let i = 0; i < n; i++) {
-    const xa = i * step, xb = (i + 1) * step;
-    let a = H(i, 0), b = H(i + 1, 0);
-    tri(xa, a, 0, xb, b, 0, xa, a - D, 0, sr, sg, sb);
-    tri(xb, b, 0, xb, b - D, 0, xa, a - D, 0, sr, sg, sb);
-
-    a = H(i, n); b = H(i + 1, n);
-    tri(xb, b, S, xa, a, S, xa, a - D, S, sr, sg, sb);
-    tri(xb, b, S, xa, a - D, S, xb, b - D, S, sr, sg, sb);
+  const bottom = (edge: number, k: number) => grid + edge * w + k;
+  for (let k = 0; k <= n; k++) {
+    writeVertex(bottom(0, k), k * step, H(k, 0) - D, 0, k);
+    writeVertex(bottom(1, k), k * step, H(k, n) - D, S, n * w + k);
+    writeVertex(bottom(2, k), 0, H(0, k) - D, k * step, k * w);
+    writeVertex(bottom(3, k), S, H(n, k) - D, k * step, k * w + n);
   }
+
+  const index = vertexCount > 65535
+    ? new Uint32Array(n * n * 6 + n * 24)
+    : new Uint16Array(n * n * 6 + n * 24);
+  let q = 0;
+  const tri = (a: number, b: number, c: number) => {
+    index[q++] = a;
+    index[q++] = b;
+    index[q++] = c;
+  };
   for (let j = 0; j < n; j++) {
-    const za = j * step, zb = (j + 1) * step;
-    let a = H(0, j), b = H(0, j + 1);
-    tri(0, b, zb, 0, a, za, 0, a - D, za, sr, sg, sb);
-    tri(0, b, zb, 0, a - D, za, 0, b - D, zb, sr, sg, sb);
-
-    a = H(n, j); b = H(n, j + 1);
-    tri(S, a, za, S, b, zb, S, a - D, za, sr, sg, sb);
-    tri(S, b, zb, S, b - D, zb, S, a - D, za, sr, sg, sb);
+    for (let i = 0; i < n; i++) {
+      const v00 = j * w + i;
+      const v10 = v00 + 1;
+      const v01 = v00 + w;
+      const v11 = v01 + 1;
+      // 割り方の判定は terrain.ts に 1 つだけ置いてある。heightOnGrid も同じものを
+      // 使うので、足元と見た目が必ず一致する。ここでベタ書きに戻さないこと。
+      if (splitsAlongMainDiagonal(H(i, j), H(i + 1, j), H(i, j + 1), H(i + 1, j + 1))) {
+        tri(v00, v01, v11);
+        tri(v00, v11, v10);
+      } else {
+        tri(v00, v01, v10);
+        tri(v01, v11, v10);
+      }
+    }
+  }
+  for (let k = 0; k < n; k++) {
+    // z = 0 の辺
+    tri(k, k + 1, bottom(0, k));
+    tri(k + 1, bottom(0, k + 1), bottom(0, k));
+    // z = S の辺
+    tri(n * w + k + 1, n * w + k, bottom(1, k));
+    tri(n * w + k + 1, bottom(1, k), bottom(1, k + 1));
+    // x = 0 の辺
+    tri((k + 1) * w, k * w, bottom(2, k));
+    tri((k + 1) * w, bottom(2, k), bottom(2, k + 1));
+    // x = S の辺
+    tri(k * w + n, (k + 1) * w + n, bottom(3, k));
+    tri((k + 1) * w + n, bottom(3, k + 1), bottom(3, k));
   }
 
-  return { position, normal, color, water: buildWater(terrain, ox, oz, step, n, H) };
+  return {
+    position,
+    normal,
+    color,
+    rock,
+    surf,
+    index,
+    water: buildWater(terrain, ox, oz, step, n, H),
+  };
 }
 
 /**
@@ -300,42 +306,3 @@ const CORNERS: readonly (readonly [number, number])[] = [
   [0, 1],
   [1, 1],
 ];
-
-/** 三角形 1 枚の色を、その 3 頂点の高さと傾き、そして四角形の曲率から決める。 */
-function shadeTri(
-  terrain: Terrain,
-  ha: number,
-  hb: number,
-  hc: number,
-  x: number,
-  z: number,
-  slope: number,
-  temp: number,
-  moisture: number,
-  special: SpecialHit,
-  patch: number,
-  curv: number,
-  i: number,
-  j: number,
-  which: number,
-  out: Float32Array,
-): void {
-  const h = (ha + hb + hc) / 3;
-  terrain.shade(x, z, h, slope, temp, moisture, special, patch, out, 0);
-
-  // 曲率による明暗。凹みを暗くすることで、影を落とさずに形を読ませる。
-  // 面ごとのランダムな明暗だけでは、平らな面の上では「模様」に見えて形に見えない。
-  // x/(1+|x|) で柔らかく飽和させる（clamp で切ると黒い斑になる。CURVATURE_GAIN 参照）。
-  const g = curv * CURVATURE_GAIN;
-  const k = g / (1 + Math.abs(g));
-  const shape = 1 + k * (k < 0 ? CURVATURE_DARK : CURVATURE_LIGHT);
-
-  // わずかな揺らぎ。曲率がほぼ 0 の平地が均一になりすぎるのを防ぐ。
-  // 曲率と競合しないよう、以前の ±6% から ±3% に落としてある。
-  const jitter = 0.97 + hash2(i, j * 2 + which, 7717) * 0.06;
-
-  const t = shape * jitter;
-  out[0] *= t;
-  out[1] *= t;
-  out[2] *= t;
-}

@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { SEA_LEVEL } from '../island/ground';
 import { ISLAND_SIZE } from '../island/grid';
 import { RENDER_ORDER } from './order';
+import { WAVE_SLOPE, createWaveTexture } from './waveTexture';
 
 const vert = /* glsl */ `
   varying vec3 vWorld;
@@ -33,18 +34,21 @@ const frag = /* glsl */ `
   uniform sampler2D uHeightMap;
   uniform float uHeightN;
   uniform float uIslandSize;
+  uniform sampler2D uWaves;
   varying vec3 vWorld;
 
   #include <fog_pars_fragment>
 
-  // 向きと速さの違う波を重ね、周期が読めないようにする。
-  float waveHeight(vec2 p) {
-    float h = 0.0;
-    h += sin(dot(p, vec2(0.062, 0.031)) + uTime * 0.55) * 0.55;
-    h += sin(dot(p, vec2(-0.041, 0.074)) + uTime * 0.42) * 0.45;
-    h += sin(dot(p, vec2(0.121, -0.096)) + uTime * 0.83) * 0.20;
-    h += sin(dot(p, vec2(0.198, 0.164)) + uTime * 1.15) * 0.10;
-    return h;
+  // 波の模様（render/waveTexture.ts）。r,g = 傾き、b = 傾きの 2 乗、a = 高さ。
+  // 大きさと向きと流れる向きを変えて 3 回引く。ミップマップで遠くほど均され、
+  // 均されて消えた波の傾きは「分散」として残る（照り返しの広がりに使う）。
+  void waveLayer(vec2 uv, float gain, inout vec2 slope, inout float variance, inout float height) {
+    vec4 t = texture2D(uWaves, uv);
+    vec2 s = (t.xy * 2.0 - 1.0) * WAVE_SLOPE;
+    float meanSq = t.z * 2.0 * WAVE_SLOPE * WAVE_SLOPE;
+    slope += s * gain;
+    variance += max(0.0, meanSq - dot(s, s)) * gain * gain;
+    height += (t.w - 0.5) * gain;
   }
 
   // 島の大きな形の高さ（m）。格子の 4 点を読んで双一次で補間する（浮動小数のテクスチャは
@@ -81,11 +85,15 @@ const frag = /* glsl */ `
   void main() {
     vec2 p = vWorld.xz;
 
-    // 高さ場の差分から法線を作る。細かいさざ波はここだけで表現する。
-    float e = 1.2;
-    float hx = waveHeight(p + vec2(e, 0.0)) - waveHeight(p - vec2(e, 0.0));
-    float hz = waveHeight(p + vec2(0.0, e)) - waveHeight(p - vec2(0.0, e));
-    vec3 n = normalize(vec3(-hx * 0.55, 1.0, -hz * 0.55));
+    // 波: 数十 m のうねり、数 m の風の波、数十 cm のさざ波。大きさの比を整数にしない（繰り返しが揃わない）。
+    // 流れる速さは実際の波（長いほど速い）に寄せつつ、テクスチャが滑って見えない程度に抑える。
+    vec2 slope = vec2(0.0);
+    float variance = 0.0006;
+    float height = 0.0;
+    waveLayer(p / 337.0 + uTime * vec2(0.0072, 0.0031), 0.3, slope, variance, height);
+    waveLayer(mat2(0.8, -0.6, 0.6, 0.8) * p / 61.0 + uTime * vec2(-0.021, 0.013), 0.35, slope, variance, height);
+    waveLayer(mat2(0.28, 0.96, -0.96, 0.28) * p / 17.3 + uTime * vec2(0.047, -0.031), 0.3, slope, variance, height);
+    vec3 n = normalize(vec3(-slope.x, 1.0, -slope.y));
 
     vec3 viewDir = normalize(cameraPosition - vWorld);
     float facing = clamp(dot(n, viewDir), 0.0, 1.0);
@@ -96,20 +104,43 @@ const frag = /* glsl */ `
     vec3 body = mix(uShallow, uMid, smoothstep(0.4, 7.0, depth));
     body = mix(body, uDeep, smoothstep(7.0, 45.0, depth));
     body *= mix(0.85, 1.0, facing);
+    // うねりの山は少し明るく、谷は少し暗く（遠くでは均されて消える）。
+    body *= 1.0 + height * 0.25 * smoothstep(3.0, 15.0, depth);
     vec3 col = mix(body, uSkyColor, clamp(fres * 1.1, 0.0, 0.85));
 
-    // 太陽の細い帯。穏やかさを壊さない程度に。
+    // 太陽の照り返し。波の面の傾きが、太陽を目に返す向きにどれだけ散っているかで決める
+    // （傾きの分布を正規分布とみなす。Bruneton et al. 2010）。近くでは面ごとに光り、
+    // 遠くでは均された波の分散で広がって、太陽の下に光の道ができる。
     vec3 h = normalize(uSunDir + viewDir);
-    float spec = pow(max(dot(n, h), 0.0), 220.0);
-    col += uSunColor * spec * 1.6;
+    vec2 zeta = h.xz / max(h.y, 0.05) + slope;
+    float glint = exp(-0.5 * dot(zeta, zeta) / variance) / (6.2832 * variance);
+    float schlick = 0.02 + 0.98 * pow(1.0 - clamp(dot(viewDir, h), 0.0, 1.0), 5.0);
+    col += uSunColor * min(glint * schlick * 0.35, 3.0);
 
-    // 波打ち際の泡: 水際から少し沖（水深 0.1〜1.3m）の帯と、岸へ寄せてくる白波の筋。
-    // 水深 0 のちょうど上に置くと、地面との描き合いで泡ごとちらつく。
-    float grain = vnoise(p * 0.18 + vec2(uTime * 0.25, -uTime * 0.18));
-    float band = smoothstep(0.08, 0.3, depth) * (1.0 - smoothstep(0.7 + grain * 0.6, 1.4 + grain * 0.6, depth));
-    float surf = sin(depth * 2.6 - uTime * 1.3 + grain * 3.0);
-    float lines = smoothstep(0.78, 0.97, surf) * smoothstep(0.3, 0.8, depth) * (1.0 - smoothstep(0.8, 3.2, depth));
-    float foam = clamp(max(band * (0.55 + 0.45 * grain), lines * 0.55), 0.0, 1.0);
+    // 波打ち際の泡: 水際から数 m の帯と、岸へ寄せてくる白波の筋。
+    // **水深ではなく、水際からの距離で置く。** 水深で「0.1〜1.4m」と決めると、遠浅の浜では
+    // その帯が数十 m に広がり、砂浜に白い影が染み出して見えた（利用者の指摘）。
+    // 距離は 水深 ÷ 海底の傾き で見積もる。傾きを引くのは浅い所だけ（深い所は泡が無いので飛ばす）。
+    // 水深 0 のちょうど上には置かない。地面との描き合いで泡ごとちらつく。
+    float foam = 0.0;
+    float grain = 0.5;
+    if (depth < 4.0) {
+      float probe = uIslandSize / (uHeightN - 1.0) * 0.5;
+      vec2 grad = vec2(
+        groundAt(p + vec2(probe, 0.0)) - groundAt(p - vec2(probe, 0.0)),
+        groundAt(p + vec2(0.0, probe)) - groundAt(p - vec2(0.0, probe))
+      ) / (2.0 * probe);
+      float shore = depth / max(length(grad), 0.02);
+      grain = vnoise(p * 0.18 + vec2(uTime * 0.25, -uTime * 0.18));
+      float band = smoothstep(0.08, 0.3, depth) * (1.0 - smoothstep(2.5 + grain * 3.0, 6.0 + grain * 3.0, shore));
+      float surf = sin(shore * 0.42 - uTime * 1.3 + grain * 3.0);
+      float lines = smoothstep(0.78, 0.97, surf) * smoothstep(3.0, 7.0, shore) * (1.0 - smoothstep(14.0, 26.0, shore))
+        * smoothstep(0.2, 0.5, depth) * (1.0 - smoothstep(0.9, 1.8, depth));
+      foam = clamp(max(band * (0.55 + 0.45 * grain), lines * 0.55), 0.0, 1.0);
+      // 波が寄せるのは海だけ。川と湖（海面より高い水）では、岸にうっすらした縁だけ残す。
+      // 海と同じ泡を立てると、川の両岸が白い土手のように見えた。
+      if (vWorld.y > 0.5) foam = band * (1.0 - smoothstep(0.8, 2.0, shore)) * 0.3;
+    }
     col = mix(col, vec3(0.95, 0.97, 0.98), foam * 0.85);
 
     // 浅いほど透けて底が見える。深い所と、斜めから見た所は映り込みで不透明に近づく。
@@ -132,10 +163,6 @@ function col(hex: number): THREE.Color {
   return new THREE.Color().setHex(hex, THREE.SRGBColorSpace);
 }
 
-/**
- * 海面と湖面。1 枚の大きな面をカメラに追従させて無限に見せる。
- * 波は法線だけで作るので、面の分割は粗くてよい。
- */
 /**
  * 水の材質。海の板と、チャンクごとの内陸水面（湖）が**同じものを共有する**。
  *
@@ -162,13 +189,14 @@ export function waterMaterial(
         uHeightMap: { value: null as THREE.Texture | null },
         uHeightN: { value: 0 },
         uIslandSize: { value: ISLAND_SIZE },
+        uWaves: { value: createWaveTexture() },
         uSkyColor: { value: col(skyHorizon) },
         uSunColor: { value: col(sunHex) },
         uSunDir: { value: sunDirection.clone() },
         ...THREE.UniformsLib.fog,
       },
       vertexShader: vert,
-      fragmentShader: frag,
+      fragmentShader: `#define WAVE_SLOPE ${WAVE_SLOPE.toFixed(3)}\n${frag}`,
       transparent: true,
       depthWrite: false,
       side: THREE.DoubleSide,

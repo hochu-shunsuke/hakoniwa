@@ -11,15 +11,25 @@ import { SPECIAL_BIOMES, type SpecialHit, srgb } from './special';
  *   - 谷筋（曲がりが負・水が集まる）: 湿って緑が濃い。雪も溜まる
  *   - 尾根（曲がりが正）: 乾いて明るい。岩が出やすく、雪は飛ばされる
  *   - 乾いた斜面は低木と枯れ草の色、湿った斜面は緑のまま急な所まで上がる
- *   - 岩は地方ごとに種類が違う（灰色の花崗岩・赤みの砂岩・黒い玄武岩・白っぽい石灰岩）。地層の縞も入る
+ *   - 岩は地方ごとに種類が違う（灰色の花崗岩・赤みの砂岩・黒い玄武岩・白っぽい石灰岩）
  *   - 崖の下の緩んだ所には崖錐（明るい礫）
  *
- * 傾きは大きな地形（16m）のものを主に使う。細部（2m）の傾きで切り替えると、
+ * **ここでは色を混ぜ切らない。** 土台・岩・雪の 3 層と、岩と雪の量を頂点ごとに返し、
+ * 境目は画素ごとに揺らして切る（render/terrainMaterial.ts）。頂点や面の単位で混ぜ切ると、
+ * 雪と岩の境が格子の四角に揃って市松模様になった（利用者の指摘。遠くの粗いチャンクほど目立つ）。
+ *
+ * 傾きは大きな地形（16m）のものを主に使う。細部の傾きで切り替えると、
  * 雪と岩が四角いドットの模様になった。表示専用なので決定性の決まりの外（三角関数を使ってよい）。
  */
 
+/**
+ * 1 点ぶんの地面の層の並び。
+ *   0..2 土台の色（草・土・砂・海底）、3..5 岩の色、6 岩の量、7 雪の量、8 凹みの明暗（1 で変化なし）
+ */
+export const SURFACE_STRIDE = 9;
+
 const C_SAND = srgb(0xd8c79c);
-const C_SNOW = srgb(0xeef2f4);
+export const C_SNOW = srgb(0xeef2f4);
 const C_SCRUB = srgb(0x8a8052);
 const C_DRY = srgb(0xbcae78);
 const C_LUSH = srgb(0x3c6a3a);
@@ -34,6 +44,14 @@ const ROCKS: readonly (readonly [readonly number[], readonly number[]])[] = [
   [srgb(0x5e5956), srgb(0x3b3735)], // 玄武岩
   [srgb(0xbfb8a7), srgb(0x8f887a)], // 石灰岩
 ];
+
+// 曲がりによる明暗（擬似 AO）。凹みを暗く、盛り上がりを明るくして、影を落とさずに形を読ませる。
+// 大きな形（16m 格子）の曲がりで測る。チャンクの格子で測ると、細部の起伏を拾って
+// 面ごとに明暗が跳び、雪の上に灰色の四角が散った。
+// x/(1+x) で柔らかく飽和させる（clamp で切ると 1 割以上の面が一律に張り付いて黒い斑になる）。
+const CURVATURE_GAIN = 6;
+const CURVATURE_DARK = 0.3;
+const CURVATURE_LIGHT = 0.15;
 
 const TEMP_STOPS = [0.14, 0.45, 0.76] as const;
 const MOIST_STOPS = [0.15, 0.42, 0.66] as const;
@@ -78,7 +96,7 @@ function rockColor(rockTone: number, dark: number, out: Float32Array): void {
 
 const ROCK = new Float32Array(3);
 
-export function shadeIsland(
+export function surfaceIsland(
   h: number,
   slopeLocal: number,
   f: SurfaceFields,
@@ -134,28 +152,44 @@ export function shadeIsland(
     0,
     1,
   ) * (1 - gully * 0.55);
-  if (rocky > 0) {
-    // 暗い面は高い所と谷側、明るい面は尾根。地層の縞で水平の帯を入れる。
-    const dark = clamp(0.35 + smoothstep(150, 450, h) * 0.3 - ridge * 0.35 + gully * 0.2, 0, 1);
-    rockColor(rockTone, dark, ROCK);
-    const strata = 1 + 0.1 * Math.sin(h * 0.45 + patch * 0.9) + 0.06 * Math.sin(h * 0.13 + 1.7);
-    ROCK[0] *= strata;
-    ROCK[1] *= strata;
-    ROCK[2] *= strata;
-    blend(ROCK, rocky);
-  }
+  // 暗い面は高い所と谷側、明るい面は尾根。地層の縞は画素ごとに入れる（高さの解像度が要るため）。
+  const dark = clamp(0.35 + smoothstep(150, 450, h) * 0.3 - ridge * 0.35 + gully * 0.2, 0, 1);
+  rockColor(rockTone, dark, ROCK);
 
-  // 浜辺と、水の中の砂地。
-  blend(C_SAND, 1 - smoothstep(1.2, 4, h));
-  blend(C_SEABED, smoothstep(-1.5, -22, h));
+  // 浜辺と、水の中の砂地。岩は砂に埋もれる。
+  const sand = 1 - smoothstep(1.2, 4, h);
+  const seabed = smoothstep(-1.5, -22, h);
+  blend(C_SAND, sand);
+  blend(C_SEABED, seabed);
 
   // 雪: 寒い所の、急すぎない面。谷筋に溜まり、尾根では飛ばされる。
   const snow =
     smoothstep(0.16, 0.03, temp + patch * 0.03 + ridge * 0.04 - gully * 0.04) *
-    (1 - smoothstep(0.95, 1.35, slope));
-  blend(C_SNOW, snow);
+    (1 - smoothstep(0.95, 1.35, slope)) *
+    // 雪は陸の上だけ。気温は海の底でも寒い地方では低いので、これが無いと海底が白くなる。
+    smoothstep(0.5, 3, h);
+
+  const g = f.curvature * CURVATURE_GAIN;
+  const k = g / (1 + Math.abs(g));
 
   out[o] = RGB[0];
   out[o + 1] = RGB[1];
   out[o + 2] = RGB[2];
+  out[o + 3] = ROCK[0];
+  out[o + 4] = ROCK[1];
+  out[o + 5] = ROCK[2];
+  out[o + 6] = rocky * (1 - sand) * (1 - seabed);
+  out[o + 7] = snow;
+  out[o + 8] = 1 + k * (k < 0 ? CURVATURE_DARK : CURVATURE_LIGHT);
+}
+
+/**
+ * 層を 1 色に混ぜる（小さな地図など、画素ごとに混ぜられない所で使う）。凹みの明暗は掛けない。
+ */
+export function composeSurface(layers: ArrayLike<number>, o: number, out: Float32Array, p: number): void {
+  const rock = layers[o + 6];
+  const snow = layers[o + 7];
+  for (let c = 0; c < 3; c++) {
+    out[p + c] = mix(mix(layers[o + c], layers[o + 3 + c], rock), C_SNOW[c], snow);
+  }
 }

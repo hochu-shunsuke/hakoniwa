@@ -4,7 +4,7 @@ import { Climate } from './climate';
 import type { IslandWater } from './islandWater';
 import { Noise2D, clamp, mix, smoothstep } from './noise';
 import { type SpecialHit, specialAt } from './special';
-import { shadeIsland } from './islandSurface';
+import { SURFACE_STRIDE, composeSurface, surfaceIsland } from './islandSurface';
 import { IslandShape, type LandscapeArrays, type SurfaceFields } from './islandShape';
 
 export const SEA_LEVEL = 0;
@@ -40,6 +40,7 @@ export class Terrain {
   private readonly nPatch: Noise2D;
   private readonly nRock: Noise2D;
   private readonly fields: SurfaceFields = { slope: 0, curvature: 0, drainage: 0 };
+  private readonly layers = new Float32Array(SURFACE_STRIDE);
   private readonly moistureBias: number;
   private readonly warmthBias: number;
 
@@ -132,11 +133,12 @@ export class Terrain {
   }
 
   /**
-   * 面の色。気温 × 湿り気の気候帯に、侵食が作った地形の性質（谷筋・尾根・水の集まり）で
-   * 塗り分けを重ねる（islandSurface.ts）。slopeLocal はその面の細部の傾き。
-   * out に 0..1 のリニア RGB を書き込む。
+   * 地面の層（土台・岩・雪の色と量、凹みの明暗）。気温 × 湿り気の気候帯に、侵食が作った
+   * 地形の性質（谷筋・尾根・水の集まり）で塗り分けを重ねる（islandSurface.ts）。
+   * slopeLocal はその点の細部の傾き。out[o..o+SURFACE_STRIDE) に書き込む。色は 0..1 のリニア RGB。
+   * 層は画素ごとに混ぜる（render/terrainMaterial.ts）。
    */
-  shade(
+  surface(
     x: number,
     z: number,
     h: number,
@@ -151,6 +153,23 @@ export class Terrain {
     this.shape.fieldsAt(x, z, this.fields);
     // 岩の種類は地方ごと（波長 約 1.5km）。
     const rockTone = this.nRock.noise(x * 0.0007, z * 0.0007);
-    shadeIsland(h, slopeLocal, this.fields, temp, moisture, special, patch, rockTone, out, o);
+    surfaceIsland(h, slopeLocal, this.fields, temp, moisture, special, patch, rockTone, out, o);
+  }
+
+  /** 層を混ぜ切った 1 色（小さな地図用）。out[o..o+3) にリニア RGB を書く。 */
+  shade(
+    x: number,
+    z: number,
+    h: number,
+    slopeLocal: number,
+    temp: number,
+    moisture: number,
+    special: SpecialHit,
+    patch: number,
+    out: Float32Array,
+    o: number,
+  ): void {
+    this.surface(x, z, h, slopeLocal, temp, moisture, special, patch, this.layers, 0);
+    composeSurface(this.layers, 0, out, o);
   }
 }
