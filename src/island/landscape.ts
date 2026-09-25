@@ -22,6 +22,16 @@ import type { IslandParams } from './params';
 const ITERATIONS = 140;
 /** 一番深い海（m）。 */
 const SEA_DEPTH = 70;
+
+/**
+ * 島のまわりの浅い棚（ラグーン）。海岸から少しの間は数 m の浅瀬が続き、棚の縁で深く落ちる。
+ * 水面の色は水深で変わるので（render/water.ts）、浅瀬が島を明るいエメラルドの輪で縁取る。
+ * 暖かい島ほど棚の縁にサンゴ礁の高まりを作り、そこに白波を立てる。
+ */
+const SHELF_DEPTH = 5;
+/** 棚の幅（輪郭の値。海岸で 0、外へ向かって負に増える）。 */
+const SHELF_END = 0.16;
+const REEF_TOP = 1.2;
 /**
  * 斜面の拡散の強さ（1 回あたり、格子 1 本分の係数）。0.25 を越えると不安定。
  * 0.06 では尾根が丸まりすぎ、谷の枝分かれが消えて丸い凸凹になった。
@@ -32,6 +42,12 @@ export interface Landscape {
   n: number;
   /** 侵食した後の大きな地形（m）。海面が 0。 */
   height: Float32Array;
+  /** 大きな地形の傾き（1m 進むあたりの上り）。色を塗るときに細部の揺れに左右されないよう、こちらを使う。 */
+  slope: Float32Array;
+  /** 曲がり（正 = 尾根・盛り上がり、負 = 谷筋・窪み）。m / 格子² を 1 格子あたりに直したもの。 */
+  curvature: Float32Array;
+  /** 水の集まり 0..1。侵食で求めた集水面積の平方根を、島の中で正規化したもの。谷筋ほど大きい。 */
+  drainage: Float32Array;
 }
 
 export function buildLandscape(p: IslandParams, n: number): Landscape {
@@ -49,6 +65,7 @@ export function buildLandscape(p: IslandParams, n: number): Landscape {
   const erosion = p.erosion / 100;
 
   const radius = mix(0.42, 0.86, size);
+  const warm = p.warmth / 100;
   const coastNoise = mix(0.18, 0.75, shape);
   /** 山の高さ（m）。二乗で持ち上げ、つまみの上半分で急に険しくなる。 */
   const peak = mix(120, 900, mountains * mountains);
@@ -73,7 +90,15 @@ export function buildLandscape(p: IslandParams, n: number): Landscape {
 
       if (land <= 0 || i === 0 || j === 0 || i === n - 1 || j === n - 1) {
         base[k] = 1;
-        h[k] = -SEA_DEPTH * smoothstep(0, 0.5, -land);
+        const out = -land;
+        const shelf = -SHELF_DEPTH * smoothstep(0, SHELF_END * 0.6, out);
+        const drop = -SEA_DEPTH * smoothstep(SHELF_END, SHELF_END + 0.3, out);
+        // サンゴ礁: 棚の縁の少し内側に高まり。暖かいほど高く、海面すれすれまで来る。
+        const reef = smoothstep(0.45, 0.85, warm) * (SHELF_DEPTH - REEF_TOP) *
+          smoothstep(SHELF_END * 0.55, SHELF_END * 0.85, out) *
+          (1 - smoothstep(SHELF_END * 0.85, SHELF_END * 1.05, out)) *
+          (0.55 + 0.45 * (fbm(nCoast, u * 3.1, v * 3.1, 2, 2.0) * 0.5 + 0.5));
+        h[k] = Math.min(shelf, 0) + drop + reef;
         continue;
       }
       // 山の形: 輪郭から内側へ上がる丸い山（dome）に、尾根の筋（ridge）と峰の散らばり（peaks）。
@@ -91,14 +116,46 @@ export function buildLandscape(p: IslandParams, n: number): Landscape {
   // 0.0022 以下では谷が浅く、谷の刻みのつまみを動かしても見分けがつかなかった。
   const K = mix(0.004, 0.03, erosion);
   const U = peak * 0.0035;
-  erode(h, uplift, base, n, cell, K, U);
+  const area = erode(h, uplift, base, n, cell, K, U);
 
-  const out = new Float32Array(N);
-  for (let k = 0; k < N; k++) out[k] = h[k];
-  return { n, height: out };
+  const height = new Float32Array(N);
+  for (let k = 0; k < N; k++) height[k] = h[k];
+  return { n, height, ...surfaceFields(height, area, base, n, cell) };
 }
 
-/** FastScape 型の侵食と斜面の拡散。h を書き換える。 */
+/**
+ * 色を塗るための地形の性質。大きな形（16m）から一度だけ求める。
+ * 細部（2m）の傾きで色を切り替えると、雪と岩が四角いドットの模様になった。
+ */
+function surfaceFields(
+  h: Float32Array,
+  area: Float64Array,
+  base: Uint8Array,
+  n: number,
+  cell: number,
+): { slope: Float32Array; curvature: Float32Array; drainage: Float32Array } {
+  const N = n * n;
+  const slope = new Float32Array(N);
+  const curvature = new Float32Array(N);
+  const drainage = new Float32Array(N);
+  let maxRoot = 1;
+  for (let k = 0; k < N; k++) if (!base[k]) maxRoot = Math.max(maxRoot, Math.sqrt(area[k]));
+  // 集水面積の平方根を、島で一番大きい川で 1 になるように。細い沢でも色に効くよう、さらに平方根を取る。
+  for (let k = 0; k < N; k++) drainage[k] = base[k] ? 0 : Math.sqrt(Math.sqrt(area[k]) / maxRoot);
+  for (let j = 1; j < n - 1; j++) {
+    for (let i = 1; i < n - 1; i++) {
+      const k = j * n + i;
+      const dx = (h[k + 1] - h[k - 1]) / (2 * cell);
+      const dz = (h[k + n] - h[k - n]) / (2 * cell);
+      slope[k] = Math.sqrt(dx * dx + dz * dz);
+      // 周りより高ければ正（尾根）、低ければ負（谷筋）。
+      curvature[k] = (4 * h[k] - h[k + 1] - h[k - 1] - h[k + n] - h[k - n]) / (4 * cell);
+    }
+  }
+  return { slope, curvature, drainage };
+}
+
+/** FastScape 型の侵食と斜面の拡散。h を書き換え、最後の集水面積（m²）を返す。 */
 function erode(
   h: Float64Array,
   uplift: Float64Array,
@@ -107,7 +164,7 @@ function erode(
   cell: number,
   K: number,
   U: number,
-): void {
+): Float64Array {
   const N = n * n;
   const rec = new Int32Array(N);
   const dist = new Float64Array(N);
@@ -189,4 +246,5 @@ function erode(
       for (let i = 1; i < n - 1; i++) h[j * n + i] = next[j * n + i];
     }
   }
+  return area;
 }

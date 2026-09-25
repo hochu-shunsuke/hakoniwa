@@ -56,7 +56,7 @@ export function drawIsland(canvas: HTMLCanvasElement, island: Island, terrain: T
         const x = gridToWorld(i, n);
         const z = gridToWorld(j, n);
         const slope = Math.min(1, Math.sqrt(dx * dx + dz * dz));
-        terrain.shade(h, slope, temperature[k], moisture[k], terrain.specialAt(x, z), terrain.patchAt(x, z), color, 0);
+        terrain.shade(x, z, h, slope, temperature[k], moisture[k], terrain.specialAt(x, z), terrain.patchAt(x, z), color, 0);
       }
       const o = (pj * size + pi) * 4;
       px[o] = toByte(color[0] * shade);

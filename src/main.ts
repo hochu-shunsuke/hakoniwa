@@ -122,6 +122,7 @@ function show(next: Island, made: IslandParams): void {
   madeParams = made;
   terrain = new Terrain(made, next.landscape, new IslandWater(next.water));
   overview.set(next, terrain);
+  water.setHeightMap(next.landscape.height, next.landscape.n);
   drawIsland(minimap, next, terrain);
   if (ground) ground.terrain = terrain;
   else ground = new IslandGround(terrain);

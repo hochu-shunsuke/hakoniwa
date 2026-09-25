@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { SEA_LEVEL } from '../island/ground';
+import { ISLAND_SIZE } from '../island/grid';
 import { RENDER_ORDER } from './order';
 
 const vert = /* glsl */ `
@@ -20,10 +21,14 @@ const vert = /* glsl */ `
 const frag = /* glsl */ `
   uniform float uTime;
   uniform vec3 uShallow;
+  uniform vec3 uMid;
   uniform vec3 uDeep;
   uniform vec3 uSkyColor;
   uniform vec3 uSunColor;
   uniform vec3 uSunDir;
+  uniform sampler2D uHeightMap;
+  uniform float uHeightN;
+  uniform float uIslandSize;
   varying vec3 vWorld;
 
   #include <fog_pars_fragment>
@@ -38,6 +43,37 @@ const frag = /* glsl */ `
     return h;
   }
 
+  // 島の大きな形の高さ（m）。格子の 4 点を読んで双一次で補間する（浮動小数のテクスチャは
+  // 端末によって線形補間できないため、自分で混ぜる）。島の外は外洋の深さ。
+  float groundAt(vec2 xz) {
+    if (uHeightN < 2.0) return -70.0;
+    vec2 g = (xz / uIslandSize + 0.5) * (uHeightN - 1.0);
+    if (g.x < 0.0 || g.y < 0.0 || g.x > uHeightN - 1.0 || g.y > uHeightN - 1.0) return -70.0;
+    vec2 i = min(floor(g), vec2(uHeightN - 2.0));
+    vec2 f = g - i;
+    ivec2 c = ivec2(i);
+    float a = texelFetch(uHeightMap, c, 0).r;
+    float b = texelFetch(uHeightMap, c + ivec2(1, 0), 0).r;
+    float d = texelFetch(uHeightMap, c + ivec2(0, 1), 0).r;
+    float e = texelFetch(uHeightMap, c + ivec2(1, 1), 0).r;
+    return mix(mix(a, b, f.x), mix(d, e, f.x), f.y);
+  }
+
+  // 泡の粒。小さい座標だけで引く（スマホ GPU の精度でも崩れないように）。
+  float hash12(vec2 p) {
+    p = mod(p, 97.0);
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+  }
+  float vnoise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(hash12(i), hash12(i + vec2(1.0, 0.0)), f.x),
+               mix(hash12(i + vec2(0.0, 1.0)), hash12(i + vec2(1.0, 1.0)), f.x), f.y);
+  }
+
   void main() {
     vec2 p = vWorld.xz;
 
@@ -48,18 +84,33 @@ const frag = /* glsl */ `
     vec3 n = normalize(vec3(-hx * 0.55, 1.0, -hz * 0.55));
 
     vec3 viewDir = normalize(cameraPosition - vWorld);
-    float fres = pow(1.0 - clamp(dot(n, viewDir), 0.0, 1.0), 3.0);
+    float facing = clamp(dot(n, viewDir), 0.0, 1.0);
+    float fres = pow(1.0 - facing, 3.0);
 
-    // 見下ろすほど水の色、浅い角度ほど空の映り込み。
-    vec3 body = mix(uDeep, uShallow, clamp(dot(n, viewDir), 0.0, 1.0) * 0.65);
-    vec3 col = mix(body, uSkyColor, clamp(fres * 1.25, 0.0, 0.92));
+    // 水深で色を変える。浅瀬は明るいエメラルドで底が透け、深みは濃い青に沈む。
+    float depth = max(0.0, vWorld.y - groundAt(p));
+    vec3 body = mix(uShallow, uMid, smoothstep(0.4, 7.0, depth));
+    body = mix(body, uDeep, smoothstep(7.0, 45.0, depth));
+    body *= mix(0.85, 1.0, facing);
+    vec3 col = mix(body, uSkyColor, clamp(fres * 1.1, 0.0, 0.85));
 
     // 太陽の細い帯。穏やかさを壊さない程度に。
     vec3 h = normalize(uSunDir + viewDir);
     float spec = pow(max(dot(n, h), 0.0), 220.0);
     col += uSunColor * spec * 1.6;
 
-    float alpha = mix(0.72, 0.97, fres);
+    // 波打ち際の泡: 水際のすぐ内側の帯と、岸へ寄せてくる白波の筋。
+    float grain = vnoise(p * 0.18 + vec2(uTime * 0.25, -uTime * 0.18));
+    float shore = 1.0 - smoothstep(0.0, 0.9 + grain * 0.6, depth);
+    float surf = sin(depth * 2.6 - uTime * 1.3 + grain * 3.0);
+    float lines = smoothstep(0.78, 0.97, surf) * (1.0 - smoothstep(0.6, 3.2, depth)) * step(0.05, depth);
+    float foam = clamp(max(shore * (0.55 + 0.45 * grain), lines * 0.55), 0.0, 1.0);
+    col = mix(col, vec3(0.95, 0.97, 0.98), foam * 0.85);
+
+    // 浅いほど透けて底が見える。深い所と、斜めから見た所は映り込みで不透明に近づく。
+    float alpha = mix(0.45, 0.94, smoothstep(0.3, 10.0, depth));
+    alpha = max(alpha, fres * 0.95);
+    alpha = max(alpha, foam * 0.9);
     gl_FragColor = vec4(col, alpha);
 
     // three の標準マテリアルと同じ順序。霧の色は出力色空間で渡ってくるため最後。
@@ -95,8 +146,14 @@ export function waterMaterial(
     shared = new THREE.ShaderMaterial({
       uniforms: {
         uTime: { value: 0 },
-        uShallow: { value: col(0x5c93a0) },
-        uDeep: { value: col(0x27505e) },
+        // 浅瀬のエメラルド → 中くらいの青緑 → 深い青。
+        uShallow: { value: col(0x5fd3c4) },
+        uMid: { value: col(0x1f9bb0) },
+        uDeep: { value: col(0x1a4f7c) },
+        // 島の大きな形の高さ（水深を求める）。島ができるまでは空で、全部を深い海として描く。
+        uHeightMap: { value: null as THREE.Texture | null },
+        uHeightN: { value: 0 },
+        uIslandSize: { value: ISLAND_SIZE },
         uSkyColor: { value: col(skyHorizon) },
         uSunColor: { value: col(sunHex) },
         uSunDir: { value: sunDirection.clone() },
@@ -143,6 +200,18 @@ export class Water {
     this.mesh.frustumCulled = false;
     this.mesh.renderOrder = RENDER_ORDER.water;
     scene.add(this.mesh);
+  }
+
+  /** 島の大きな形の高さを渡す（水深で色と泡を変えるため）。島を作り直すたびに呼ぶ。 */
+  setHeightMap(height: Float32Array, n: number): void {
+    const u = this.material.uniforms;
+    (u.uHeightMap.value as THREE.Texture | null)?.dispose();
+    const tex = new THREE.DataTexture(height, n, n, THREE.RedFormat, THREE.FloatType);
+    tex.magFilter = THREE.NearestFilter;
+    tex.minFilter = THREE.NearestFilter;
+    tex.needsUpdate = true;
+    u.uHeightMap.value = tex;
+    u.uHeightN.value = n;
   }
 
   update(camera: THREE.Camera, elapsed: number): void {

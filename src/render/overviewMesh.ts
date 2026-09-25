@@ -14,7 +14,6 @@ import { RENDER_ORDER } from './order';
  * 重ねて描くと 2 枚の地面が深度を奪い合ってチラつき、消すと読み込み中に穴が開くため。
  */
 
-const SEABED = new THREE.Color().setHex(0x3f6b6a, THREE.SRGBColorSpace);
 const SEABED_DEEP = new THREE.Color().setHex(0x1f3d52, THREE.SRGBColorSpace);
 /** 格子の外に敷く海底の深さ（m）。島の縁の海の深さより少し下げて重ならないようにする。 */
 const OUTER_SEABED = -80.5;
@@ -49,19 +48,12 @@ export function buildOverviewTerrain(island: Island, terrain: Terrain): THREE.Bu
       position[k * 3] = x;
       position[k * 3 + 1] = h;
       position[k * 3 + 2] = z;
-      if (h <= 0) {
-        const deep = Math.min(1, -h / 60);
-        c[0] = SEABED.r + (SEABED_DEEP.r - SEABED.r) * deep;
-        c[1] = SEABED.g + (SEABED_DEEP.g - SEABED.g) * deep;
-        c[2] = SEABED.b + (SEABED_DEEP.b - SEABED.b) * deep;
-      } else {
-        // 傾きは chunk.ts と同じ「四角形の高低差 ÷ 対角」で測る。
-        const i1 = Math.min(n - 1, i + 1);
-        const j1 = Math.min(n - 1, j + 1);
-        const hs = [h, height[j * n + i1], height[j1 * n + i], height[j1 * n + i1]];
-        const slope = Math.min(1, (Math.max(...hs) - Math.min(...hs)) / (cell * 1.4142));
-        terrain.shade(h, slope, temperature[k], moisture[k], terrain.specialAt(x, z), terrain.patchAt(x, z), c, 0);
-      }
+      // 傾きは chunk.ts と同じ「四角形の高低差 ÷ 対角」で測る。
+      const i1 = Math.min(n - 1, i + 1);
+      const j1 = Math.min(n - 1, j + 1);
+      const hs = [h, height[j * n + i1], height[j1 * n + i], height[j1 * n + i1]];
+      const slope = Math.min(1, (Math.max(...hs) - Math.min(...hs)) / (cell * 1.4142));
+      terrain.shade(x, z, h, slope, temperature[k], moisture[k], terrain.specialAt(x, z), terrain.patchAt(x, z), c, 0);
       color[k * 3] = c[0];
       color[k * 3 + 1] = c[1];
       color[k * 3 + 2] = c[2];

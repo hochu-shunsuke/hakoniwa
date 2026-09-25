@@ -174,16 +174,16 @@ export function buildChunkArrays(
       // 割り方の判定は terrain.ts に 1 つだけ置いてある。heightOnGrid も同じものを
       // 使うので、足元と見た目が必ず一致する。ここでベタ書きに戻さないこと。
       if (splitsAlongMainDiagonal(h00, h10, h01, h11)) {
-        shadeTri(terrain, h00, h01, h11, slope, temp, moisture, special, patch, curv, i, j, 0, faceColor);
+        shadeTri(terrain, h00, h01, h11, cx, cz, slope, temp, moisture, special, patch, curv, i, j, 0, faceColor);
         tri(x0, h00, z0, x0, h01, z1, x1, h11, z1, faceColor[0], faceColor[1], faceColor[2]);
 
-        shadeTri(terrain, h00, h11, h10, slope, temp, moisture, special, patch, curv, i, j, 1, faceColor);
+        shadeTri(terrain, h00, h11, h10, cx, cz, slope, temp, moisture, special, patch, curv, i, j, 1, faceColor);
         tri(x0, h00, z0, x1, h11, z1, x1, h10, z0, faceColor[0], faceColor[1], faceColor[2]);
       } else {
-        shadeTri(terrain, h00, h01, h10, slope, temp, moisture, special, patch, curv, i, j, 0, faceColor);
+        shadeTri(terrain, h00, h01, h10, cx, cz, slope, temp, moisture, special, patch, curv, i, j, 0, faceColor);
         tri(x0, h00, z0, x0, h01, z1, x1, h10, z0, faceColor[0], faceColor[1], faceColor[2]);
 
-        shadeTri(terrain, h01, h11, h10, slope, temp, moisture, special, patch, curv, i, j, 1, faceColor);
+        shadeTri(terrain, h01, h11, h10, cx, cz, slope, temp, moisture, special, patch, curv, i, j, 1, faceColor);
         tri(x0, h01, z1, x1, h11, z1, x1, h10, z0, faceColor[0], faceColor[1], faceColor[2]);
       }
     }
@@ -307,6 +307,8 @@ function shadeTri(
   ha: number,
   hb: number,
   hc: number,
+  x: number,
+  z: number,
   slope: number,
   temp: number,
   moisture: number,
@@ -319,7 +321,7 @@ function shadeTri(
   out: Float32Array,
 ): void {
   const h = (ha + hb + hc) / 3;
-  terrain.shade(h, slope, temp, moisture, special, patch, out, 0);
+  terrain.shade(x, z, h, slope, temp, moisture, special, patch, out, 0);
 
   // 曲率による明暗。凹みを暗くすることで、影を落とさずに形を読ませる。
   // 面ごとのランダムな明暗だけでは、平らな面の上では「模様」に見えて形に見えない。

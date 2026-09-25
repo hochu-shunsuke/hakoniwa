@@ -4,8 +4,8 @@ import { Climate } from './climate';
 import type { IslandWater } from './islandWater';
 import { Noise2D, clamp, mix, smoothstep } from './noise';
 import { type SpecialHit, specialAt } from './special';
-import { shadeTerrain } from './surfaceShade';
-import { IslandShape, type LandscapeArrays } from './islandShape';
+import { shadeIsland } from './islandSurface';
+import { IslandShape, type LandscapeArrays, type SurfaceFields } from './islandShape';
 
 export const SEA_LEVEL = 0;
 
@@ -38,6 +38,8 @@ export class Terrain {
   private readonly nSpecialEdge: Noise2D;
   private readonly specialSalt: number;
   private readonly nPatch: Noise2D;
+  private readonly nRock: Noise2D;
+  private readonly fields: SurfaceFields = { slope: 0, curvature: 0, drainage: 0 };
   private readonly moistureBias: number;
   private readonly warmthBias: number;
 
@@ -54,6 +56,7 @@ export class Terrain {
     this.nSpecialEdge = new Noise2D((a ^ 0x165667b1) >>> 0);
     this.specialSalt = (b ^ 0x9e3779b1) >>> 0;
     this.nPatch = new Noise2D((d ^ 0x61c88647) >>> 0);
+    this.nRock = new Noise2D((c ^ 0x2545f491) >>> 0);
     this.moistureBias = mix(-0.3, 0.3, params.wetness / 100);
     this.warmthBias = mix(-0.35, 0.35, params.warmth / 100);
   }
@@ -129,12 +132,15 @@ export class Terrain {
   }
 
   /**
-   * 面の色。気温 × 湿り気へ標高・傾き・特殊区画の効果を重ねる。
+   * 面の色。気温 × 湿り気の気候帯に、侵食が作った地形の性質（谷筋・尾根・水の集まり）で
+   * 塗り分けを重ねる（islandSurface.ts）。slopeLocal はその面の細部の傾き。
    * out に 0..1 のリニア RGB を書き込む。
    */
   shade(
+    x: number,
+    z: number,
     h: number,
-    slope: number,
+    slopeLocal: number,
     temp: number,
     moisture: number,
     special: SpecialHit,
@@ -142,6 +148,9 @@ export class Terrain {
     out: Float32Array,
     o: number,
   ): void {
-    shadeTerrain(h, slope, temp, moisture, special, patch, out, o);
+    this.shape.fieldsAt(x, z, this.fields);
+    // 岩の種類は地方ごと（波長 約 1.5km）。
+    const rockTone = this.nRock.noise(x * 0.0007, z * 0.0007);
+    shadeIsland(h, slopeLocal, this.fields, temp, moisture, special, patch, rockTone, out, o);
   }
 }

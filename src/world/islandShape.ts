@@ -17,6 +17,17 @@ export interface LandscapeArrays {
   n: number;
   /** 侵食した後の大きな地形（m）。 */
   height: Float32Array;
+  /** 大きな地形の傾き・曲がり（正 = 尾根、負 = 谷筋）・水の集まり 0..1。色を塗るのに使う。 */
+  slope: Float32Array;
+  curvature: Float32Array;
+  drainage: Float32Array;
+}
+
+/** 色を塗るための地形の性質（fieldsAt が書き込む）。 */
+export interface SurfaceFields {
+  slope: number;
+  curvature: number;
+  drainage: number;
 }
 
 /** 島の格子の外（外洋）の深さ（m）。landscape.ts の一番深い海と揃える。 */
@@ -71,6 +82,30 @@ export class IslandShape {
     const d = this.at(i + 1, j + 1);
     return (a + (b - a) * fu) * (1 - fv) + (c + (d - c) * fu) * fv;
   };
+
+  /** 色を塗るための地形の性質を、大きな形の格子から双一次で引く。 */
+  fieldsAt(x: number, z: number, out: SurfaceFields): SurfaceFields {
+    const { n, slope, curvature, drainage } = this.land;
+    const u = this.toGrid(x);
+    const v = this.toGrid(z);
+    if (u < 0 || v < 0 || u >= n - 1 || v >= n - 1) {
+      out.slope = 0;
+      out.curvature = 0;
+      out.drainage = 0;
+      return out;
+    }
+    const i = u | 0;
+    const j = v | 0;
+    const fu = u - i;
+    const fv = v - j;
+    const k = j * n + i;
+    const lerp = (f: Float32Array) =>
+      (f[k] + (f[k + 1] - f[k]) * fu) * (1 - fv) + (f[k + n] + (f[k + n + 1] - f[k + n]) * fu) * fv;
+    out.slope = lerp(slope);
+    out.curvature = lerp(curvature);
+    out.drainage = lerp(drainage);
+    return out;
+  }
 
   /** 大きな形（3 次補間）。 */
   macroAt(x: number, z: number): number {
