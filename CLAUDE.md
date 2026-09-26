@@ -1,4 +1,6 @@
-# 作業メモ
+# 作業メモ（island maker）
+
+リポジトリ・手元のフォルダ・公開先（Cloudflare）の名前はすべて `island-maker`（旧名 hakoniwa）。
 
 **つまみで島をつくり、鳥になって自分の島を飛び、URL を送って友達と一緒に飛ぶ。**
 目的も期限もない。作った島を見せたくなることが芯。
@@ -104,7 +106,7 @@ src/render/   見渡す島と遠景（overviewMesh.ts）、遠目の木（farFor
 - **侵食の隣は番号の差で引く**（`landscape.ts` の `nOff`）。`for (const [di, dj, dd] of NEIGHBORS8)` の
   分解だけで侵食全体の 8 割（1.3 秒）を使っていた。書き方を変えても計算の順番と値は同じなので島は変わらない
 - 測った値（M3）: 島が見えるまで 0.6 秒、入れるまで 1.7 秒（直す前は両方 2.9 秒）。stroll は約 0.8 秒で入れる。
-  差の根は作り方の違い（stroll は足元の 9 区画だけ、hakoniwa は島全体の侵食・川・気候を先に計算する）
+  差の根は作り方の違い（stroll は足元の 9 区画だけ、island maker は島全体の侵食・川・気候を先に計算する）
 
 ## 画面と操作（stroll と揃える）
 
@@ -122,5 +124,5 @@ src/render/   見渡す島と遠景（overviewMesh.ts）、遠目の木（farFor
 ```bash
 npm run dev   # http://localhost:5173（LAN 公開）
 npm run ci    # 型・ビルド（テストはまだ無い）
-npm run deploy  # ビルドして Cloudflare へ（https://hakoniwa-maker.hochu.workers.dev）。静的ファイルだけ
+npm run deploy  # ビルドして Cloudflare へ（https://island-maker.hochu.workers.dev）。静的ファイルだけ
 ```

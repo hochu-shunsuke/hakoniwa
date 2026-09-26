@@ -28,7 +28,7 @@ import { IslandWater } from './world/islandWater';
 import { Terrain } from './world/terrain';
 
 /**
- * hakoniwa maker。カードのつまみで島を作りながら見渡し、
+ * island maker。カードのつまみで島を作りながら見渡し、
  * 「この島へ入る」で鳥になって飛ぶ。
  * つまみと種は URL の `#` に載るので、URL を送れば同じ島を渡せる。
  *

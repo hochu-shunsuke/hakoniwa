@@ -1,8 +1,8 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  // hakoniwa maker。サーバの処理は無く、ビルドした静的ファイルを配るだけ。
+  // island maker。サーバの処理は無く、ビルドした静的ファイルを配るだけ。
   // 島は URL の # に載るので、サーバは島を知らない。
-  "name": "hakoniwa-maker",
+  "name": "island-maker",
   "compatibility_date": "2026-09-01",
   "assets": { "directory": "./dist" }
 }
